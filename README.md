@@ -230,10 +230,16 @@ della sessione locale attiva. Il prefisso `70-` è obbligatorio, perché
 pacchetto `acl`, che un'installazione di base non ha):
 
 ```sh
-sudo apt install acl   # Debian; su Arch/Omarchy `acl` è già presente (dipendenza di systemd)
+sudo apt install acl             # Debian; su Arch/Omarchy `acl` è già presente (dipendenza di systemd)
+sudo pacman -S usbutils          # solo Arch/Omarchy: fornisce `lsusb`, che su Debian c'è già
 getfacl /dev/bus/usb/$(lsusb -d 2104:0127 | awk '{print $2"/"substr($4,1,3)}')
 # deve comparire user:<utente>:rw-
 ```
+
+`lsusb` serve solo a questa verifica (e al suggerimento che il driver stampa
+quando il tracker è occupato): non è una dipendenza del driver. Senza di esso
+il nodo si trova anche in sysfs, per esempio
+`grep -l 0127 /sys/bus/usb/devices/*/idProduct`.
 
 L'ACL c'è solo finché l'utente ha una **sessione locale attiva**: un desktop
 (anche un compositor Wayland come Hyprland su Omarchy) o un login sulla console.
