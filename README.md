@@ -661,16 +661,22 @@ resumed`.
   Un test di regressione copre il bug trovato dal vivo: dopo una ricerca lenta
   il viso deve essere seguito, non ricercato.
 - Installazione da zero (2026-11-04) su una VM Debian 13.7 appena installata,
-  senza desktop (VirtualBox 7.1, 4C in passthrough USB). La procedura di
-  questo README funziona per intero:
-  - build e test;
-  - udev: `uaccess` con un login locale, variante `plugdev` via SSH;
-  - gaze a 90 Hz senza frame persi e immagini IR a 28,6 Hz;
-  - UDP e LSL (90,07 Hz);
+  senza desktop (VirtualBox 7.1, 4C in passthrough USB). Tutti i blocchi
+  `sh` di questo README, eseguiti così come sono scritti e nell'ordine in cui
+  compaiono, terminano senza errori:
+  - build, test e benchmark;
   - `go install`;
+  - udev: `uaccess` con un login locale, variante `plugdev` via SSH;
+  - LSL a 89,9 Hz;
+  - le 17 righe di [Uso](#uso). `calibrate` e `headpose-calibrate` sono
+    stati provati su Xvfb. `calibration apply`/`restore` lasciano il blob
+    sul dispositivo identico byte per byte;
   - servizio systemd;
   - hotplug con riconnessione;
   - `camera.json` copiato da un altro computer.
+
+  Con le immagini sempre attive: 2 minuti di gaze a 90 Hz senza frame persi
+  e immagini IR a 30 Hz.
 
 ## Limiti e prossimi passi
 
