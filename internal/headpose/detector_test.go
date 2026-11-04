@@ -51,18 +51,6 @@ func TestSamplerNormalisesContrast(t *testing.T) {
 	}
 }
 
-func faceModel(t testing.TB) string {
-	if p := os.Getenv("TOBII4C_FACE_MODEL"); p != "" {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".local", "share", "tobii4c", ModelFileName)
-	if _, err := os.Stat(p); err != nil {
-		t.Skip("face model not installed (make headpose-model)")
-	}
-	return p
-}
-
 // loadGray legge un'immagine qualsiasi (PGM, PNG, JPEG) in scala di grigi.
 func loadGray(t testing.TB, path string) *irimg.Frame {
 	fh, err := os.Open(path)
@@ -156,7 +144,7 @@ func TestDetectOnImage(t *testing.T) {
 	if path == "" {
 		t.Skip("set TOBII4C_FACE_IMAGE")
 	}
-	d, err := NewDetector(faceModel(t), 4)
+	d, err := NewDetector(os.Getenv("TOBII4C_FACE_MODEL"), 4) // vuoto: modello incorporato
 	if err != nil {
 		t.Fatal(err)
 	}

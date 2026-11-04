@@ -26,7 +26,7 @@ func cmdHeadPoseCalibrate(args []string) error {
 	var c common
 	c.register(fs)
 	monName := fs.String("monitor", "", "monitor da usare (default: il primario); vedi tobii4c calibrate -monitors")
-	model := fs.String("model", defaultModelPath(), "modello ONNX dei landmark del viso (make headpose-model)")
+	model := fs.String("model", "", "modello ONNX dei landmark del viso (default: quello incorporato nel binario)")
 	sessions := fs.String("sessions", "", "cartella delle registrazioni (default ~/.cache/tobii4c/headpose)")
 	shots := fs.Bool("screenshots", false, "salva anche la finestra come PNG nella cartella della sessione")
 	from := fs.String("from", "", "senza interfaccia: ricalcola la calibrazione della camera da sessioni registrate (cartelle separate da virgole) e la salva")
@@ -37,9 +37,6 @@ func cmdHeadPoseCalibrate(args []string) error {
 		return calibrateFromSessions(strings.Split(*from, ","), *serial)
 	}
 
-	if _, err := os.Stat(*model); err != nil {
-		return fmt.Errorf("modello del viso: %w (installalo con make headpose-model)", err)
-	}
 	camPath, err := store.CameraPath()
 	if err != nil {
 		return err

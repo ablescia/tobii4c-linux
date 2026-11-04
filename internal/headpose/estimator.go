@@ -30,7 +30,7 @@ import (
 
 // Config configura lo stimatore.
 type Config struct {
-	ModelPath  string        // modello ONNX dei landmark
+	ModelPath  string        // modello ONNX dei landmark; vuoto: quello incorporato
 	CameraPath string        // file della calibrazione della camera (letto e scritto)
 	Workers    int           // goroutine dell'inferenza (default 1: più goroutine guadagnano poco e costano CPU)
 	MaxRate    float64       // inferenze al secondo al massimo (0 = una per immagine, 30 Hz)
@@ -164,7 +164,11 @@ func New(cfg Config, log *slog.Logger) (*Estimator, error) {
 		return nil, err
 	}
 	e := newEstimator(cfg, log, det)
-	log.Info("head pose model loaded", "path", cfg.ModelPath, "mmac", det.MACs()/1_000_000, "workers", cfg.Workers)
+	model := cfg.ModelPath
+	if model == "" {
+		model = "embedded"
+	}
+	log.Info("head pose model loaded", "model", model, "mmac", det.MACs()/1_000_000, "workers", cfg.Workers)
 	if !det.Verified {
 		log.Warn("head pose: the face model is not the tested one (SHA-256 differs)", "want_sha256", ModelSHA256)
 	}

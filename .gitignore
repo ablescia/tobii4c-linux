@@ -36,9 +36,9 @@ go.work.sum
 /bin/
 *.prof
 
-# tobii4c: artefatti prodotti dal driver: log, modello del viso scaricato
-# (make headpose-model), immagini IR di `tobii4c dump -images`
+# tobii4c: artefatti prodotti dal driver: log, immagini IR di
+# `tobii4c dump -images`, modelli ONNX di prova (quello del viso è versionato)
 *.log
 *.onnx
-*.onnx.part
+!/internal/facemodel/face_landmarks_detector.onnx
 *.pgm

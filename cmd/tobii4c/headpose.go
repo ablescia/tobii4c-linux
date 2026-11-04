@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"image/color"
 	"image/png"
-	"io/fs"
 	"log/slog"
 	"math"
 	"os"
@@ -23,18 +22,6 @@ import (
 	_ "image/jpeg"
 )
 
-// dataDir è la cartella dei dati installati ($XDG_DATA_HOME/tobii4c,
-// default ~/.local/share/tobii4c): ci sta il modello del viso.
-func dataDir() string {
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return filepath.Join(d, "tobii4c")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "tobii4c")
-}
-
-func defaultModelPath() string { return filepath.Join(dataDir(), headpose.ModelFileName) }
-
 // headposeFlags sono i flag del pitch della testa (comando run).
 type headposeFlags struct {
 	mode    string
@@ -47,8 +34,8 @@ type headposeFlags struct {
 }
 
 func (h *headposeFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&h.mode, "headpose", "auto", "pitch della testa dalle immagini IR: auto (se il modello è installato), on, off")
-	fs.StringVar(&h.model, "headpose-model", defaultModelPath(), "modello ONNX dei landmark del viso (make headpose-model)")
+	fs.StringVar(&h.mode, "headpose", "on", "pitch della testa dalle immagini IR: on, off")
+	fs.StringVar(&h.model, "headpose-model", "", "modello ONNX dei landmark del viso (default: quello incorporato nel binario)")
 	fs.IntVar(&h.workers, "headpose-workers", 1, "goroutine dell'inferenza del modello del viso (più goroutine: meno latenza, più CPU)")
 	fs.Float64Var(&h.rate, "headpose-rate", 30, "inferenze al secondo al massimo (le immagini arrivano a 30 Hz)")
 	fs.StringVar(&h.debug, "headpose-debug", "", "cartella in cui salvare ogni 2 s un'immagine annotata (landmark, ritaglio, occhi)")
@@ -61,16 +48,9 @@ func (h *headposeFlags) setup(log *slog.Logger) (*headpose.Estimator, error) {
 	switch h.mode {
 	case "off":
 		return nil, nil
-	case "auto", "on":
+	case "on", "auto": // auto: vecchio default, quando il modello andava installato a parte
 	default:
-		return nil, fmt.Errorf("-headpose: %q non valido (auto, on, off)", h.mode)
-	}
-	if _, err := os.Stat(h.model); err != nil {
-		if h.mode == "auto" && errors.Is(err, fs.ErrNotExist) {
-			log.Info("head pitch disabled: face model not installed (make headpose-model)", "path", h.model)
-			return nil, nil
-		}
-		return nil, fmt.Errorf("-headpose-model: %w", err)
+		return nil, fmt.Errorf("-headpose: %q non valido (on, off)", h.mode)
 	}
 	cam := h.camera
 	if cam == "" {
@@ -143,7 +123,7 @@ func round1(v float64) float64 { return math.Round(v*10) / 10 }
 // PNG o JPEG): serve a controllare i landmark senza il dispositivo.
 func cmdFace(args []string) error {
 	fset := flag.NewFlagSet("face", flag.ExitOnError)
-	model := fset.String("model", defaultModelPath(), "modello ONNX dei landmark del viso")
+	model := fset.String("model", "", "modello ONNX dei landmark del viso (default: quello incorporato)")
 	out := fset.String("out", "", "salva qui un PNG annotato")
 	workers := fset.Int("workers", 1, "goroutine dell'inferenza")
 	runs := fset.Int("bench", 0, "ripete l'inferenza N volte e stampa il tempo medio")

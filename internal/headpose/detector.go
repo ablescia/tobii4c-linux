@@ -8,22 +8,20 @@ import (
 	"os"
 	"sort"
 
+	"github.com/ablescia/tobii4c-linux/internal/facemodel"
 	"github.com/ablescia/tobii4c-linux/internal/irimg"
 	"github.com/ablescia/tobii4c-linux/internal/nn"
 )
 
-// Modello: MediaPipe Face Landmarker, rete "face_landmarks_detector" del
-// bundle face_landmarker.task (float16, versione 1), convertita in ONNX.
-// Licenza Apache 2.0, © Google LLC.
+// Modello: MediaPipe Face Landmarker, rete "face_landmarks_detector",
+// incorporata nel binario (internal/facemodel). Licenza Apache 2.0, © Google LLC.
 const (
 	ModelInput     = 256 // lato del ritaglio
 	NumLandmarks   = 478 // 468 punti della mesh + 10 dell'iride
 	modelInputName = "input_12"
 	modelLandmarks = "Identity"   // [1,1,1,1434]: x, y, z in pixel del ritaglio
 	modelPresence  = "Identity_1" // [1,1,1,1]: logit della presenza del viso
-	ModelSHA256    = "7d6e82dee82a1dca5fbddb282b3cc74571833a530de317fc22ae325c3358beeb"
-	ModelURL       = "https://huggingface.co/senty-au/face_landmarks_detector-ONNX/resolve/main/onnx/model.onnx"
-	ModelFileName  = "face_landmarks_detector.onnx"
+	ModelSHA256    = facemodel.SHA256
 	minFaceScore   = 0.5
 	roiScale       = 1.5 // lato del ritaglio / lato del riquadro dei landmark (MediaPipe)
 )
@@ -56,11 +54,17 @@ type Detector struct {
 	pres  []float32
 }
 
-// NewDetector carica il modello ONNX.
+// NewDetector carica il modello ONNX dal file path; con path vuoto usa
+// quello incorporato nel binario.
 func NewDetector(path string, workers int) (*Detector, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("face model: %w", err)
+	data := facemodel.ONNX
+	if path != "" {
+		var err error
+		if data, err = os.ReadFile(path); err != nil {
+			return nil, fmt.Errorf("face model: %w", err)
+		}
+	} else {
+		path = "(embedded)"
 	}
 	sum := sha256.Sum256(data)
 	m, err := nn.Parse(data, []int{1, ModelInput, ModelInput, 3})

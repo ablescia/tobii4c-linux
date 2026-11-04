@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"math"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"testing"
+
+	"github.com/ablescia/tobii4c-linux/internal/facemodel"
 )
 
 // --- codificatore protobuf minimale per costruire modelli di prova ---------
@@ -267,22 +267,8 @@ func TestParseRejectsGarbage(t *testing.T) {
 	}
 }
 
-// FaceModelPath restituisce il modello MediaPipe se è installato (per i test
-// che lo richiedono): $TOBII4C_FACE_MODEL oppure il percorso di default.
-func faceModelPath(t testing.TB) string {
-	if p := os.Getenv("TOBII4C_FACE_MODEL"); p != "" {
-		return p
-	}
-	home, _ := os.UserHomeDir()
-	p := filepath.Join(home, ".local", "share", "tobii4c", "face_landmarks_detector.onnx")
-	if _, err := os.Stat(p); err != nil {
-		t.Skip("face model not installed (make headpose-model)")
-	}
-	return p
-}
-
 func TestFaceModelLoads(t *testing.T) {
-	m, err := Load(faceModelPath(t), []int{1, 256, 256, 3})
+	m, err := Parse(facemodel.ONNX, []int{1, 256, 256, 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +281,7 @@ func TestFaceModelLoads(t *testing.T) {
 }
 
 func BenchmarkFaceModel(b *testing.B) {
-	m, err := Load(faceModelPath(b), []int{1, 256, 256, 3})
+	m, err := Parse(facemodel.ONNX, []int{1, 256, 256, 3})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -306,14 +292,4 @@ func BenchmarkFaceModel(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		m.Run()
 	}
-}
-
-// Load legge e compila un modello ONNX. inputShape è la forma dell'unico
-// ingresso (batch 1).
-func Load(path string, inputShape []int) (*Model, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return Parse(data, inputShape)
 }

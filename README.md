@@ -187,12 +187,10 @@ Se il repository è privato, Go deve saltare il proxy pubblico e usare le tue
 credenziali Git (chiave SSH o token):
 `GOPRIVATE=github.com/ablescia/* go install …`.
 
-Per il pitch della testa serve il modello del viso (4,9 MB, verificato con
-SHA-256; nessuna libreria nativa):
-
-```sh
-make headpose-model # → ~/.local/share/tobii4c/face_landmarks_detector.onnx
-```
+Il modello del viso per il pitch della testa (4,9 MB) è nel repository
+(`internal/facemodel`) e viene incorporato nel binario con `go:embed`: non va
+scaricato né installato. Per ogni installazione restano da fare solo la
+calibrazione della camera e lo zero personale (`tobii4c headpose-calibrate`).
 
 Con LSL serve liblsl. Debian non la pacchettizza; il `.deb` ufficiale per Ubuntu
 24.04 funziona anche su Debian 13 (provato con la 1.17.7):
@@ -263,12 +261,12 @@ Flag principali di `run`:
 | `-udp` | `127.0.0.1:5005` | destinazione dei datagrammi (vuoto = off) |
 | `-lsl` | off | outlet LSL `Tobii4C`, 27 canali float32 |
 | `-presence` | on | sottoscrive lo stream presence (0x504) e lo riporta in ogni campione |
-| `-headpose` | auto | pitch della testa dalle immagini IR: `auto` se il modello è installato, `on`, `off` |
+| `-headpose` | on | pitch della testa dalle immagini IR: `on`, `off` |
 | `-headpose-rate` | 30 | inferenze al secondo al massimo (le immagini arrivano a 30 Hz) |
 | `-headpose-workers` | 1 | goroutine dell'inferenza |
 | `-headpose-debug` | — | cartella per un'immagine annotata ogni 2 s (landmark, ritaglio, occhi proiettati) |
 | `-headpose-images-always` | off | non sospende lo stream immagine quando l'utente è assente |
-| `-headpose-model`, `-headpose-camera` | vedi testo | modello ONNX e file della calibrazione della camera |
+| `-headpose-model`, `-headpose-camera` | vedi testo | modello ONNX alternativo (default: quello incorporato) e file della calibrazione della camera |
 | `-workers` | 2 | goroutine di decodifica |
 | `-raw-queue` | 1 | capacità del canale reader→framer (0 = non bufferizzato) |
 | `-frame-pool` | 64 | frame in volo prima di scartare |
@@ -282,6 +280,65 @@ Flag principali di `run`:
 | `-log-level`, `-log-format` | info, text | `slog`; `json` per l'ingestione strutturata |
 
 Come servizio utente systemd: `make install` e poi `systemd/tobii4c.service`.
+
+## Come calibrare correttamente
+
+Le calibrazioni sono due e diverse: una riguarda il dispositivo, l'altra la
+persona che lo usa.
+
+### Calibrazione della camera: una sola persona, una volta sola
+
+Serve solo al pitch della testa. Misura la camera IR del 4C: focale, centro
+ottico e posizione della camera rispetto al tracker. Sono proprietà
+dell'hardware, non di chi sta davanti al sensore. Basta quindi che **una sola
+persona la faccia una volta**, per esempio chi installa il sistema o chi
+assiste l'utente. Non dipende né dal monitor né dalla calibrazione dello
+sguardo.
+
+1. Con il 4C montato, avvia `tobii4c headpose-calibrate` e scegli
+   **1 (calibrazione completa)**.
+2. Muoviti con calma finché si riempiono le caselle della distanza (50–85 cm),
+   di lato (±20 cm) e in altezza (±6 cm). Il movimento della testa è
+   indispensabile: a testa ferma i parametri della camera non si possono
+   ricavare.
+3. Il programma accetta il risultato solo se l'errore di riproiezione è sotto
+   4 px e l'incertezza della rotazione sotto 1°. Con Invio lo salva in
+   `~/.config/tobii4c/camera.json`, legato al numero di serie del 4C.
+
+Va rifatta solo se si cambia 4C. Su un altro computer con lo stesso 4C basta
+copiare `camera.json`. Chi non usa il pitch può saltarla
+(`tobii4c run -headpose off`): lo sguardo funziona comunque. I dettagli sono in
+[Pitch della testa](#pitch-della-testa).
+
+### Calibrazione dello sguardo: personale
+
+La calibrazione dello sguardo adatta il modello degli occhi a una persona
+precisa. Quindi la fa **chi userà il tracker**, con i propri occhi. È la stessa
+procedura dell'applicazione ufficiale Tobii: posizione del sensore, 7 punti da
+fissare e verifica (dettagli in
+[Configurazione e calibrazione](#configurazione-e-calibrazione)):
+
+```sh
+tobii4c calibrate
+```
+
+Basta guardare i punti, la testa non si deve muovere. I tasti (Spazio, Invio)
+può premerli chi assiste. La calibrazione va rifatta **ogni volta che cambia la
+persona**, e anche se cambiano il monitor, la posizione del sensore, gli
+occhiali o le lenti a contatto. Resta attiva sul 4C e viene salvata in
+`~/.config/tobii4c/calibration.bin`. `tobii4c run -calibration saved` la
+riapplica a ogni connessione: non è ancora verificato se il 4C la conservi
+quando resta senza alimentazione. Con più persone si tiene un file per
+ciascuna: `tobii4c calibration save -f persona1.bin`, poi
+`tobii4c calibration apply -f persona1.bin`.
+
+Anche lo **zero personale del pitch** appartiene alla persona. Si misura dopo la
+calibrazione della camera: in `tobii4c headpose-calibrate` si sceglie
+**2 (solo il viso)** e si guarda il punto al centro con la testa dritta. I passi
+successivi, con il mento in su e in giù, sono solo un controllo e vanno avanti
+da soli. La verifica della presenza che segue si salta con S. Anche la
+calibrazione completa misura alla fine uno zero, ma è quello di chi l'ha
+eseguita: se è stata un'altra persona, l'utente rifà il passo 2.
 
 ## Configurazione e calibrazione
 
@@ -358,7 +415,7 @@ dalle immagini IR dello stream 0x501, come fa lo Stream Engine con l'ET5:
    immagini IR sono scure).
 2. **Landmark**: rete `face_landmarks_detector` di MediaPipe Face Landmarker
    (478 punti 3D, ritaglio 256 × 256; Apache 2.0, © Google), convertita in
-   ONNX ed eseguita da `internal/nn`, un interprete in Go puro dei soli
+   ONNX, incorporata nel binario (`internal/facemodel`) ed eseguita da `internal/nn`, un interprete in Go puro dei soli
    operatori che servono. Un'inferenza costa 113 milioni di
    moltiplicazioni-accumulo: 18–22 ms su un core del Ryzen 7 2700X, con
    AVX2/FMA (il codice Go puro resta come ripiego sulle altre CPU).
