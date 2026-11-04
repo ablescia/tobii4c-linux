@@ -105,9 +105,10 @@ Misure del 2026-11-03 su un 4C con firmware `IS4 4.7.0-d374125`
 ```
 
 - **reader**: l'unica goroutine che tocca l'endpoint IN. Usa un `ReadStream`
-  di gousb con 8 transfer da 16 KiB sempre in coda nel kernel, così il
+  di gousb con 16 transfer da 64 KiB sempre in coda nel kernel, così il
   dispositivo trova buffer pronti anche mentre il frame precedente viene
-  passato avanti. Non fa altro che leggere e inoltrare.
+  passato avanti: 1 MiB, più di tre immagini IR da 300 KB. Non fa altro che
+  leggere e inoltrare.
 - **framer**: riassembla i messaggi (frammentazione, accorpamento,
   risincronizzazione, risposte a pezzi), consegna le risposte alle richieste in
   attesa (match su `seq` e `op`), copia i frame gaze in buffer pre-allocati.
@@ -301,7 +302,7 @@ Flag principali di `run`:
 | `-workers` | 2 | goroutine di decodifica |
 | `-raw-queue` | 1 | capacità del canale reader→framer (0 = non bufferizzato) |
 | `-frame-pool` | 64 | frame in volo prima di scartare |
-| `-in-flight`, `-transfer-size` | 8, 16384 | URB IN in coda nel kernel e relativa dimensione |
+| `-in-flight`, `-transfer-size` | 16, 65536 | URB IN in coda nel kernel e relativa dimensione |
 | `-stall` | 3s | senza frame: resubscribe, poi riconnessione |
 | `-keepalive` | 5s | ping di salute (op 0x58c), RTT nei log debug |
 | `-stats` | 10s | log periodico: Hz, latenza p50/p99/max, drop, resync |
@@ -692,9 +693,9 @@ resumed`.
   | Configurazione | Durata | Frame persi |
   |---|---|---:|
   | senza immagini | 2 min | 0 |
-  | immagini, senza stimatore | 8 min | 6 |
-  | immagini con trasferimenti USB da 64 KB × 16 | 8 min | 2 |
-  | immagini e stimatore | 8 min | 6 |
+  | immagini, senza stimatore, trasferimenti USB 16 KB × 8 | 8 min | 6 |
+  | immagini, trasferimenti USB 64 KB × 16 (default attuale) | 8 min | 2 |
+  | immagini e stimatore, trasferimenti USB 16 KB × 8 | 8 min | 6 |
 
   Il frame manca dal dispositivo, non dal PC. Il log riporta il salto
   dell'orologio del tracker (`device_gap_us`, 22,2 ms, cioè un frame) e
@@ -703,6 +704,15 @@ resumed`.
   driver **sospende lo stream immagine dopo 3 s di assenza** dell'utente,
   quando le immagini sono comunque buie, e lo riprende appena l'utente torna.
   `-headpose-images-always` lo tiene sempre attivo.
+
+  I trasferimenti in coda contano quando la latenza USB cresce, per esempio
+  in una macchina virtuale. In una VM VirtualBox con il 4C in passthrough e
+  le immagini sempre attive, i vecchi 16 KB × 8 (128 KB in coda, meno di
+  un'immagine IR da 307 KB) perdevano l'**1,4%** dei frame gaze: 51 su 3 522
+  in 40 s, a gruppi di 6–9. Il `host_gap_us` di 3 ms indica che i dati si
+  perdevano nel trasporto. Con 64 KB × 16, il default dal 2026-11-04, la VM ne
+  ha persi 2 in 2 minuti, come il PC. Sul PC le due configurazioni si
+  equivalgono: 0 frame persi in 2 minuti ciascuna, latenza p50 di 39–46 µs.
 - Restano non esportate alcune colonne dello stream gaze: punto di sguardo 3D
   per occhio (0x04/0x0a), centro del bulbo oculare (0x17/0x18), posizione 2D
   rispetto al sensore (0x19/0x1a), guida al posizionamento (0x25–0x28) e 0x11,

@@ -121,8 +121,8 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.StringVar(&c.logLevel, "log-level", "info", "debug|info|warn|error")
 	fs.StringVar(&c.logFormat, "log-format", "text", "text|json")
 	fs.StringVar(&c.pid, "pid", "", "product id esadecimale da usare (default: 0127 poi 0313)")
-	fs.IntVar(&c.transferSize, "transfer-size", 16384, "byte per bulk transfer IN (multiplo di 512)")
-	fs.IntVar(&c.inFlight, "in-flight", 8, "bulk transfer IN tenute in coda nel kernel")
+	fs.IntVar(&c.transferSize, "transfer-size", 65536, "byte per bulk transfer IN (multiplo di 512)")
+	fs.IntVar(&c.inFlight, "in-flight", 16, "bulk transfer IN tenute in coda nel kernel")
 	fs.DurationVar(&c.reqTimeout, "request-timeout", 1500*time.Millisecond, "timeout di una richiesta TTP")
 }
 

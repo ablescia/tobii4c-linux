@@ -56,8 +56,8 @@ func DefaultConfig() Config {
 		Interface:    0,
 		EndpointIn:   3,
 		EndpointOut:  5,
-		TransferSize: 16 * 1024,
-		InFlight:     8,
+		TransferSize: 64 * 1024, // 16 × 64 KiB in coda: più di tre immagini IR da 300 KB
+		InFlight:     16,
 		WriteTimeout: 2 * time.Second,
 	}
 }
