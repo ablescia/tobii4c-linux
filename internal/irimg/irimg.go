@@ -1,0 +1,155 @@
+// Package irimg decodifica lo stream immagine del tracker (0x501, "image").
+//
+// Sul 4C (firmware 4.7.0) ogni messaggio è una riga XDS di 307 350 byte a
+// 30 Hz, con cinque colonne:
+//
+//	0x01 Timestamp       s64    µs, stesso orologio dello stream gaze
+//	0x02 Bits per pixel  u32    8
+//	0x03 Width           u32    640
+//	0x04 Height          u32    480
+//	0x05 Image           bytes  W×H pixel, riga per riga, scala di grigi (IR)
+package irimg
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/ablescia/tobii4c-linux/internal/ttp"
+)
+
+// Chiavi delle colonne dello stream 0x501.
+const (
+	KeyTimestamp uint32 = 0x01
+	KeyBPP       uint32 = 0x02
+	KeyWidth     uint32 = 0x03
+	KeyHeight    uint32 = 0x04
+	KeyImage     uint32 = 0x05
+)
+
+// Frame è un'immagine IR a 8 bit. Pix appartiene al Frame: Decode lo
+// riutilizza tra una chiamata e l'altra.
+type Frame struct {
+	DeviceUs int64 // timestamp del dispositivo (µs)
+	HostNs   int64 // ricezione USB (CLOCK_REALTIME, ns)
+	W, H     int
+	Pix      []byte // W*H byte, stride W
+}
+
+// At restituisce il pixel (x, y); fuori dall'immagine vale 0.
+func (f *Frame) At(x, y int) byte {
+	if x < 0 || y < 0 || x >= f.W || y >= f.H {
+		return 0
+	}
+	return f.Pix[y*f.W+x]
+}
+
+// Decode copia in f l'immagine contenuta nella riga. Accetta solo 8 bit per
+// pixel, l'unico formato osservato.
+func Decode(row *ttp.Row, f *Frame) error {
+	var w, h, bpp uint32
+	var pix []byte
+	haveTS := false
+	for i := 0; i < row.N; i++ {
+		c := &row.Cols[i]
+		switch c.Key {
+		case KeyTimestamp:
+			if c.Value.Kind == ttp.KindS64 {
+				f.DeviceUs, haveTS = c.Value.I, true
+			}
+		case KeyBPP:
+			bpp = c.Value.U
+		case KeyWidth:
+			w = c.Value.U
+		case KeyHeight:
+			h = c.Value.U
+		case KeyImage:
+			if c.Value.Kind == ttp.KindBytes {
+				pix = c.Value.B
+			}
+		}
+	}
+	switch {
+	case !haveTS:
+		return errors.New("irimg: missing timestamp")
+	case bpp != 8:
+		return fmt.Errorf("irimg: unsupported bits per pixel %d", bpp)
+	case w == 0 || h == 0 || w > 4096 || h > 4096:
+		return fmt.Errorf("irimg: implausible size %dx%d", w, h)
+	case len(pix) != int(w*h):
+		return fmt.Errorf("irimg: %d bytes for %dx%d", len(pix), w, h)
+	}
+	f.W, f.H = int(w), int(h)
+	f.Pix = append(f.Pix[:0], pix...)
+	return nil
+}
+
+// DecodePayload decodifica un payload dello stream 0x501.
+func DecodePayload(payload []byte, row *ttp.Row, f *Frame) error {
+	if err := ttp.DecodeRow(payload, row); err != nil && row.N == 0 {
+		return err
+	}
+	return Decode(row, f)
+}
+
+// WritePGM scrive il frame come PGM binario (P5).
+func (f *Frame) WritePGM(w io.Writer) error {
+	bw := bufio.NewWriter(w)
+	fmt.Fprintf(bw, "P5\n# tobii4c device_us=%d\n%d %d\n255\n", f.DeviceUs, f.W, f.H)
+	bw.Write(f.Pix[:f.W*f.H])
+	return bw.Flush()
+}
+
+// SavePGM scrive il frame nel file path.
+func (f *Frame) SavePGM(path string) error {
+	fh, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if err := f.WritePGM(fh); err != nil {
+		fh.Close()
+		return err
+	}
+	return fh.Close()
+}
+
+// ReadPGM legge un PGM binario a 8 bit (per test e strumenti).
+func ReadPGM(r io.Reader) (*Frame, error) {
+	br := bufio.NewReader(r)
+	var magic string
+	if _, err := fmt.Fscan(br, &magic); err != nil || magic != "P5" {
+		return nil, errors.New("irimg: not a binary PGM")
+	}
+	var vals [3]int
+	for i := 0; i < 3; {
+		b, err := br.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case b == '#':
+			if _, err := br.ReadString('\n'); err != nil {
+				return nil, err
+			}
+		case b >= '0' && b <= '9':
+			br.UnreadByte()
+			if _, err := fmt.Fscan(br, &vals[i]); err != nil {
+				return nil, err
+			}
+			i++
+		}
+	}
+	if vals[2] != 255 {
+		return nil, fmt.Errorf("irimg: maxval %d, want 255", vals[2])
+	}
+	if _, err := br.ReadByte(); err != nil { // un solo spazio dopo maxval
+		return nil, err
+	}
+	f := &Frame{W: vals[0], H: vals[1], Pix: make([]byte, vals[0]*vals[1])}
+	if _, err := io.ReadFull(br, f.Pix); err != nil {
+		return nil, err
+	}
+	return f, nil
+}

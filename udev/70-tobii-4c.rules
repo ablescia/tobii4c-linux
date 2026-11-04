@@ -1,0 +1,30 @@
+# /etc/udev/rules.d/70-tobii-4c.rules
+#
+# Accesso in user-space (senza root) al Tobii Eye Tracker 4C, stesso
+# approccio di Talon Voice: udev intercetta l'hotplug e assegna il nodo
+# /dev/bus/usb/BBB/DDD all'utente.
+#
+# Il numero 70 non è casuale: TAG+="uaccess" viene trasformato in ACL da
+# 73-seat-late.rules, quindi la regola deve essere letta PRIMA (< 73).
+#
+# Installazione:
+#   sudo install -m 0644 udev/70-tobii-4c.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2104
+# Verifica (deve comparire una riga "user:<tuo utente>:rw-"):
+#   getfacl /dev/bus/usb/$(lsusb -d 2104:0127 | awk '{print $2"/"substr($4,1,3)}')
+
+# --- Tobii Eye Tracker 4C (IS4 "EyeChip") -----------------------------------
+# uaccess: ACL rw per l'utente della sessione locale attiva (systemd-logind).
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2104", ATTR{idProduct}=="0127", TAG+="uaccess"
+
+# Alternativa per sistemi senza sessione logind (headless, SSH, container):
+# accesso tramite gruppo. Scommentare (e aggiungere l'utente a plugdev).
+#SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2104", ATTR{idProduct}=="0127", MODE="0660", GROUP="plugdev"
+
+# Alternativa minima e permissiva (qualsiasi utente locale: sconsigliata su
+# macchine multiutente).
+#SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2104", ATTR{idProduct}=="0127", MODE="0666"
+
+# --- Tobii Eye Tracker 5 (IS5), stessa famiglia di protocollo ---------------
+#SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2104", ATTR{idProduct}=="0313", TAG+="uaccess"

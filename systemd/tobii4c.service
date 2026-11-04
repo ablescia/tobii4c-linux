@@ -1,0 +1,15 @@
+# Unit utente: ~/.config/systemd/user/tobii4c.service
+#   systemctl --user daemon-reload && systemctl --user enable --now tobii4c
+# Richiede la regola udev (uaccess) installata: nessun privilegio di root.
+[Unit]
+Description=Tobii 4C user-space driver (gaze + head -> UDP 127.0.0.1:5005)
+
+[Service]
+ExecStart=%h/.local/bin/tobii4c run -udp 127.0.0.1:5005 -log-format json
+Restart=on-failure
+RestartSec=2
+# Priorità realtime soft per il thread di lettura (opzionale, richiede rtkit/limiti):
+#Nice=-5
+
+[Install]
+WantedBy=default.target

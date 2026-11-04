@@ -31,3 +31,14 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# tobii4c: output di make (bin/tobii4c, bin/tobii4c-race) e profili di go test
+/bin/
+*.prof
+
+# tobii4c: artefatti prodotti dal driver: log, modello del viso scaricato
+# (make headpose-model), immagini IR di `tobii4c dump -images`
+*.log
+*.onnx
+*.onnx.part
+*.pgm
