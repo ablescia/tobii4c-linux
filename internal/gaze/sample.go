@@ -66,15 +66,23 @@ const (
 //
 // Rotazioni in radianti, destrorse attorno agli assi dello schermo:
 //   - [0] pitch attorno a X: NON osservabile da due soli punti → valid=false
-//     se la sorgente è HeadDerived;
+//     se la sorgente è HeadDerived, finché non lo stima il viso nelle
+//     immagini IR (internal/headpose);
 //   - [1] yaw attorno a Y: positivo = testa ruotata verso la sinistra dell'utente;
 //   - [2] roll attorno a Z: inclinazione della linea degli occhi.
+//
+// DeriveHead ricava yaw e roll dalla linea degli occhi. Sul 4C lo yaw così
+// è sottostimato di circa 5 volte (il tracker non distingue bene quale
+// occhio è più vicino) e la parte mancante finisce nel roll: con la stima
+// dalle immagini attiva, yaw e roll vengono dal viso quando è tracciato.
+// RotationImage dice quali angoli vengono dalle immagini.
 type Head struct {
 	Source        HeadSource
 	PositionMM    [3]float32 // punto medio tra gli occhi
 	PositionValid bool
 	RotationRad   [3]float32
 	RotationValid [3]bool
+	RotationImage [3]bool // l'angolo viene dal viso nelle immagini IR, non dagli occhi
 }
 
 // Presence è lo stato dello stream presence (0x504). I valori sono quelli

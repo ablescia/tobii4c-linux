@@ -82,6 +82,23 @@ func TestUDPDelivery(t *testing.T) {
 }
 
 // Offset dichiarati nel commento del formato (e nella stringa struct di Python).
+func TestHeadRotationImageFlags(t *testing.T) {
+	in := sample()
+	in.Head.RotationValid = [3]bool{true, true, true}
+	in.Head.RotationImage = [3]bool{true, true, false}
+	var p [PacketSize]byte
+	Marshal(&p, &in)
+	f2 := binary.LittleEndian.Uint32(p[120:])
+	if f2&(Flag2HeadPitchImage|Flag2HeadYawImage|Flag2HeadRollImage) != Flag2HeadPitchImage|Flag2HeadYawImage ||
+		Flag2HeadPitchImage != 1<<6 || Flag2HeadRollImage != 1<<8 {
+		t.Fatalf("flag2 %09b", f2)
+	}
+	var out gaze.Sample
+	if err := Unmarshal(p[:], &out); err != nil || out.Head.RotationImage != in.Head.RotationImage {
+		t.Fatalf("roundtrip %+v %v", out.Head, err)
+	}
+}
+
 func TestPacketV2Layout(t *testing.T) {
 	in := sample()
 	var p [PacketSize]byte
@@ -169,6 +186,20 @@ func TestLSLChannels(t *testing.T) {
 		if !math.IsNaN(float64(v[idx(c)])) {
 			t.Errorf("%s = %v, atteso NaN", c, v[idx(c)])
 		}
+	}
+	if v[idx("head_yaw_rad")] != s.Head.RotationRad[1] || !math.IsNaN(float64(v[idx("head_pitch_rad")])) {
+		t.Errorf("angoli della testa: %v", v[idx("head_pitch_rad"):idx("head_valid")+1])
+	}
+	// Yaw dal viso con un occhio solo: angoli validi, posizione no.
+	s.Head.PositionValid, s.Head.RotationValid = false, [3]bool{true, true, true}
+	lslFill(&v, &s)
+	if v[idx("head_valid")] != 0 || v[idx("head_yaw_rad")] != s.Head.RotationRad[1] || math.IsNaN(float64(v[idx("head_pitch_rad")])) {
+		t.Errorf("yaw dal viso: %v", v[idx("head_pitch_rad"):idx("head_valid")+1])
+	}
+	s.Head.RotationValid = [3]bool{}
+	lslFill(&v, &s)
+	if !math.IsNaN(float64(v[idx("head_yaw_rad")])) || !math.IsNaN(float64(v[idx("head_roll_rad")])) {
+		t.Errorf("yaw/roll non validi: %v", v[idx("head_pitch_rad"):idx("head_valid")+1])
 	}
 	if a := testing.AllocsPerRun(1000, func() { lslFill(&v, &s) }); a != 0 {
 		t.Fatalf("lslFill alloca %.1f", a)

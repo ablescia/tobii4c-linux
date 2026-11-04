@@ -79,6 +79,11 @@ const (
 	Flag2RightTrackBox
 	Flag2LeftOpenness
 	Flag2RightOpenness
+	// L'angolo della testa (pitch, yaw, roll) viene dal viso nelle immagini
+	// IR invece che dagli occhi.
+	Flag2HeadPitchImage
+	Flag2HeadYawImage
+	Flag2HeadRollImage
 )
 
 // Marshal serializza s in p senza allocare.
@@ -119,6 +124,9 @@ func Marshal(p *[PacketSize]byte, s *gaze.Sample) {
 	set2(s.Right.TrackBoxValid, Flag2RightTrackBox)
 	set2(s.Left.OpennessValid, Flag2LeftOpenness)
 	set2(s.Right.OpennessValid, Flag2RightOpenness)
+	set2(s.Head.RotationImage[0], Flag2HeadPitchImage)
+	set2(s.Head.RotationImage[1], Flag2HeadYawImage)
+	set2(s.Head.RotationImage[2], Flag2HeadRollImage)
 	le.PutUint16(p[6:], f)
 	le.PutUint64(p[8:], s.Seq)
 	le.PutUint64(p[16:], uint64(s.HostTimeNs))
@@ -204,6 +212,7 @@ func Unmarshal(p []byte, s *gaze.Sample) error {
 	s.Left.OriginDisplayValid, s.Right.OriginDisplayValid = has2(Flag2LeftOriginDisplay), has2(Flag2RightOriginDisplay)
 	s.Left.TrackBoxValid, s.Right.TrackBoxValid = has2(Flag2LeftTrackBox), has2(Flag2RightTrackBox)
 	s.Left.OpennessValid, s.Right.OpennessValid = has2(Flag2LeftOpenness), has2(Flag2RightOpenness)
+	s.Head.RotationImage = [3]bool{has2(Flag2HeadPitchImage), has2(Flag2HeadYawImage), has2(Flag2HeadRollImage)}
 	s.Presence = gaze.Presence(p[124])
 	s.PresenceUs = int64(le.Uint64(p[128:]))
 	off = 136

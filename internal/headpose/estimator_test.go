@@ -80,7 +80,7 @@ func TestEstimatorCalibratesAndEstimatesPitch(t *testing.T) {
 
 	frame := &irimg.Frame{W: 640, H: 480, Pix: make([]byte, 640*480)}
 	var calibratedAt int64
-	var maxErr float64
+	var maxErr, maxRotErr float64
 	checked := 0
 	for k := 0; k < 30*60; k++ { // un minuto a 30 Hz
 		us := int64(k) * 33_333
@@ -108,32 +108,49 @@ func TestEstimatorCalibratesAndEstimatesPitch(t *testing.T) {
 			continue
 		}
 		rot, _ := truth(us - imageGazeLagUs)
-		p, _, _ := Euler(rot)
+		p, y, r := Euler(rot)
 		if err := math.Abs(res.RawPitch - p); err > maxErr {
 			maxErr = err
 		}
+		maxRotErr = max(maxRotErr, math.Abs(res.Yaw-y), math.Abs(res.Roll-r))
 		checked++
 	}
 	if calibratedAt == 0 {
 		t.Fatal("camera never calibrated")
 	}
-	t.Logf("calibrated after %.1f s; %d frames checked, max raw pitch error %.2f°; camera rms %.2f px σ %.2f°",
-		float64(calibratedAt)/1e6, checked, deg(maxErr), e.wq.RMSPx, e.wq.SigmaDeg)
-	if checked < 500 || deg(maxErr) > 1.0 {
-		t.Fatalf("pitch error %.2f° over %d frames", deg(maxErr), checked)
+	t.Logf("calibrated after %.1f s; %d frames checked, max raw pitch error %.2f°, yaw/roll %.2f°; camera rms %.2f px σ %.2f°",
+		float64(calibratedAt)/1e6, checked, deg(maxErr), deg(maxRotErr), e.wq.RMSPx, e.wq.SigmaDeg)
+	if checked < 500 || deg(maxErr) > 1.0 || deg(maxRotErr) > 1.0 {
+		t.Fatalf("pitch error %.2f°, yaw/roll %.2f° over %d frames", deg(maxErr), deg(maxRotErr), checked)
 	}
 
 	// il pitch viene applicato ai campioni vicini nel tempo, non a quelli vecchi
 	last := e.Last()
 	s := gaze.Sample{DeviceTimeUs: last.DeviceUs + 20_000}
 	e.Observe(&s)
-	if !s.Head.RotationValid[0] || s.Head.RotationRad[0] != float32(last.Pitch) || s.Head.Source != gaze.HeadDerived {
+	if !s.Head.RotationValid[0] || s.Head.RotationRad[0] != float32(last.Pitch) || s.Head.Source != gaze.HeadDerived ||
+		s.Head.RotationImage != [3]bool{true, false, false} {
 		t.Fatalf("pitch not applied: %+v", s.Head)
 	}
+	if s.Head.RotationValid[1] || s.Head.RotationValid[2] {
+		t.Fatalf("yaw/roll applied without ImageRotation: %+v", s.Head)
+	}
+	// con ImageRotation anche yaw e roll vengono dal viso, al posto degli occhi
+	e.cfg.ImageRotation = true
+	s = gaze.Sample{DeviceTimeUs: last.DeviceUs + 20_000}
+	s.Head.RotationRad = [3]float32{0, 0.5, 0.5} // dagli occhi
+	s.Head.RotationValid = [3]bool{false, true, true}
+	e.Observe(&s)
+	if s.Head.RotationRad != [3]float32{float32(last.Pitch), float32(last.Yaw), float32(last.Roll)} ||
+		s.Head.RotationValid != [3]bool{true, true, true} || s.Head.RotationImage != [3]bool{true, true, true} {
+		t.Fatalf("image yaw/roll not applied: %+v (last %+v)", s.Head, last)
+	}
 	old := gaze.Sample{DeviceTimeUs: last.DeviceUs + int64(time.Second/time.Microsecond)}
+	old.Head.RotationRad = [3]float32{0, 0.5, 0.5}
+	old.Head.RotationValid = [3]bool{false, true, true}
 	e.Observe(&old)
-	if old.Head.RotationValid[0] {
-		t.Fatal("stale pitch applied")
+	if old.Head.RotationValid[0] || old.Head.RotationImage != [3]bool{} || old.Head.RotationRad[1] != 0.5 {
+		t.Fatalf("stale head pose applied: %+v", old.Head)
 	}
 
 	// la calibrazione salvata viene ricaricata per lo stesso dispositivo

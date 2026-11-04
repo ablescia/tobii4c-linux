@@ -24,13 +24,14 @@ import (
 
 // headposeFlags sono i flag del pitch della testa (comando run).
 type headposeFlags struct {
-	mode    string
-	model   string
-	workers int
-	rate    float64
-	debug   string
-	camera  string
-	always  bool
+	mode     string
+	model    string
+	workers  int
+	rate     float64
+	debug    string
+	camera   string
+	always   bool
+	rotation string
 }
 
 func (h *headposeFlags) register(fs *flag.FlagSet) {
@@ -40,6 +41,7 @@ func (h *headposeFlags) register(fs *flag.FlagSet) {
 	fs.Float64Var(&h.rate, "headpose-rate", 30, "inferenze al secondo al massimo (le immagini arrivano a 30 Hz)")
 	fs.StringVar(&h.debug, "headpose-debug", "", "cartella in cui salvare ogni 2 s un'immagine annotata (landmark, ritaglio, occhi)")
 	fs.StringVar(&h.camera, "headpose-camera", "", "file della calibrazione della camera (default ~/.config/tobii4c/camera.json)")
+	fs.StringVar(&h.rotation, "headpose-rotation", "image", "da dove vengono yaw e roll della testa: image (dal viso quando è tracciato, dagli occhi altrimenti; sul 4C lo yaw degli occhi è sottostimato di circa 5 volte), eyes (sempre dagli occhi)")
 	fs.BoolVar(&h.always, "headpose-images-always", false, "tiene attivo lo stream immagine anche con l'utente assente (di default si sospende dopo 3 s: il 4C, mentre invia le immagini, salta circa un frame gaze al minuto)")
 }
 
@@ -51,6 +53,9 @@ func (h *headposeFlags) setup(log *slog.Logger) (*headpose.Estimator, error) {
 	case "on", "auto": // auto: vecchio default, quando il modello andava installato a parte
 	default:
 		return nil, fmt.Errorf("-headpose: %q non valido (on, off)", h.mode)
+	}
+	if h.rotation != "image" && h.rotation != "eyes" {
+		return nil, fmt.Errorf("-headpose-rotation: %q non valido (image, eyes)", h.rotation)
 	}
 	cam := h.camera
 	if cam == "" {
@@ -70,7 +75,7 @@ func (h *headposeFlags) setup(log *slog.Logger) (*headpose.Estimator, error) {
 		return nil, err
 	}
 	return headpose.New(headpose.Config{ModelPath: h.model, CameraPath: cam, UserPath: user, Workers: h.workers,
-		MaxRate: h.rate, DebugDir: h.debug}, log)
+		MaxRate: h.rate, DebugDir: h.debug, ImageRotation: h.rotation == "image"}, log)
 }
 
 // logHeadPoseStats scrive periodicamente lo stato dello stimatore.

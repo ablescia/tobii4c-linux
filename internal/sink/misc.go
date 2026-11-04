@@ -53,10 +53,14 @@ func Format(s *gaze.Sample) string {
 	if s.Head.RotationValid[0] {
 		pitch = fmt.Sprintf("%+.1f°", deg(s.Head.RotationRad[0]))
 	}
-	return fmt.Sprintf("#%-7d dev=%dus gaze=(%.3f,%.3f)%s  L:%s R:%s  head=(%.0f,%.0f,%.0f)mm%s pitch=%s yaw=%+.1f° roll=%+.1f°  pupil=%.2f/%.2fmm  open=%s/%smm  %s",
+	rot := ""
+	if s.Head.RotationImage[1] {
+		rot = "(img)"
+	}
+	return fmt.Sprintf("#%-7d dev=%dus gaze=(%.3f,%.3f)%s  L:%s R:%s  head=(%.0f,%.0f,%.0f)mm%s pitch=%s yaw=%+.1f° roll=%+.1f°%s  pupil=%.2f/%.2fmm  open=%s/%smm  %s",
 		s.Seq, s.DeviceTimeUs, s.Gaze[0], s.Gaze[1], v(s.GazeValid),
 		v(s.Left.Tracked), v(s.Right.Tracked),
 		s.Head.PositionMM[0], s.Head.PositionMM[1], s.Head.PositionMM[2], v(s.Head.PositionValid),
-		pitch, deg(s.Head.RotationRad[1]), deg(s.Head.RotationRad[2]),
+		pitch, deg(s.Head.RotationRad[1]), deg(s.Head.RotationRad[2]), rot,
 		s.Left.PupilMM, s.Right.PupilMM, open(&s.Left), open(&s.Right), s.Presence)
 }

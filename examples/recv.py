@@ -15,8 +15,8 @@ V1 = struct.Struct("<4sBBHQqq2f2f3f3f3f3fff2f2f")  # 120 byte, little-endian
 V2 = struct.Struct("<4sBBHQqq2f2f3f3f3f3fff2f2fIB3xq3f3f3f3fff")  # 192 byte
 assert V1.size == 120 and V2.size == 192
 
-FLAG_GAZE, FLAG_HEAD_POS = 1 << 0, 1 << 6
-FLAG2_OPEN_L, FLAG2_OPEN_R = 1 << 4, 1 << 5
+FLAG_GAZE, FLAG_HEAD_POS, FLAG_YAW = 1 << 0, 1 << 6, 1 << 8
+FLAG2_OPEN_L, FLAG2_OPEN_R, FLAG2_YAW_IMAGE = 1 << 4, 1 << 5, 1 << 7
 PRESENCE = {0: "sconosciuta", 1: "assente", 2: "presente"}
 
 
@@ -48,11 +48,15 @@ def main() -> None:
         last_print = now
         age_us = (time.time_ns() - host_ns) / 1e3
         gaze = f"({gx:.3f},{gy:.3f})" if flags & FLAG_GAZE else "   --   "
-        head = (f"({hx:.0f},{hy:.0f},{hz:.0f})mm yaw={math.degrees(yaw):+.1f}° roll={math.degrees(roll):+.1f}°"
-                if flags & FLAG_HEAD_POS else "--")
+        head = f"({hx:.0f},{hy:.0f},{hz:.0f})mm" if flags & FLAG_HEAD_POS else "--"
+        flags2 = f[29] if ver == 2 else 0
+        if flags & FLAG_YAW:
+            # con flags2 bit 7 yaw e roll vengono dal viso nelle immagini IR
+            src = "(img)" if flags2 & FLAG2_YAW_IMAGE else ""
+            head += f" yaw={math.degrees(yaw):+.1f}° roll={math.degrees(roll):+.1f}°{src}"
         extra = ""
         if ver == 2:
-            flags2, presence = f[29], f[30]
+            presence = f[30]
             open_l, open_r = f[44], f[45]
             ol = f"{open_l:.1f}" if flags2 & FLAG2_OPEN_L else "--"
             orr = f"{open_r:.1f}" if flags2 & FLAG2_OPEN_R else "--"

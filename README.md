@@ -57,6 +57,10 @@ Misure del 2026-11-03 su un 4C con firmware `IS4 4.7.0-d374125`
    (punto medio degli occhi, mm), yaw e roll (dalla linea interoculare). Il
    **pitch non è osservabile** da due punti: lo stima il driver dalle immagini
    dello stream `image` (punto 11), altrimenti resta marcato non valido.
+   Dalla linea degli occhi lo **yaw è sottostimato di circa 5 volte** (testa
+   girata di 40°: 3–7°) e la parte mancante finisce nel roll. Per questo, con
+   la stima dalle immagini attiva, anche yaw e roll vengono dal viso quando è
+   tracciato (`-headpose-rotation`, sezione "Pitch della testa").
    La posa è nel **sistema dello schermo**, come la `head_pose` dello Stream
    Engine: il firmware invia ogni centro corneale sia nel sistema del tracker
    (0x02/0x08) sia dal centro della display area (0x22/0x24, "Gaze Origin
@@ -298,6 +302,7 @@ Flag principali di `run`:
 | `-headpose-workers` | 1 | goroutine dell'inferenza |
 | `-headpose-debug` | — | cartella per un'immagine annotata ogni 2 s (landmark, ritaglio, occhi proiettati) |
 | `-headpose-images-always` | off | non sospende lo stream immagine quando l'utente è assente |
+| `-headpose-rotation` | `image` | yaw e roll della testa: `image` (dal viso quando è tracciato, dagli occhi altrimenti), `eyes` (sempre dagli occhi, come prima) |
 | `-headpose-model`, `-headpose-camera` | vedi testo | modello ONNX alternativo (default: quello incorporato) e file della calibrazione della camera |
 | `-workers` | 2 | goroutine di decodifica |
 | `-raw-queue` | 1 | capacità del canale reader→framer (0 = non bufferizzato) |
@@ -477,8 +482,31 @@ dalle immagini IR dello stream 0x501, come fa lo Stream Engine con l'ET5:
    direzione in cui guarda il viso, **positivo verso l'alto**. Filtro 1€ sul
    pitch.
 5. **Applicazione**: l'emitter scrive il pitch nei campioni gaze vicini
-   (entro 150 ms dall'immagine), con il bit 7 dei flag UDP. Yaw e roll restano
-   quelli degli occhi, più precisi; quelli dell'immagine servono da controllo.
+   (entro 150 ms dall'immagine), con il bit 7 dei flag UDP. Con
+   `-headpose-rotation image` (default) sostituisce anche yaw e roll ricavati
+   dagli occhi con quelli del viso; senza viso tracciato restano quelli degli
+   occhi. I bit 6/7/8 dei flag v2 dicono quali angoli vengono dalle immagini.
+
+**Perché yaw e roll dalle immagini.** Il 4C ha una sola camera, sotto lo
+schermo, e dei due centri corneali misura bene la posizione sul piano
+dell'immagine ma non quale dei due è più vicino. Lo yaw, che dipende proprio
+da quella differenza di profondità, esce dalla linea degli occhi sottostimato,
+e la differenza di profondità diventa in parte una differenza di altezza,
+cioè roll. Misure con una persona davanti (2026-11-04, `-stats 1s`):
+
+| movimento | viso: yaw / roll | occhi: yaw / roll |
+|---|---|---|
+| testa dritta | +5° / −1° | 0° / 0° |
+| girata a sinistra | +42° / −8° | +3…+7° / +10° |
+| girata a destra | −31° / +2° | −8…−10° / −9° |
+| inclinata a destra | −5° / −28° | −6° / −28° |
+
+Con la testa girata il viso resta tracciato nel 100% delle immagini, mentre
+oltre 25° circa il tracker perde gli occhi, e con loro lo sguardo e la
+posizione. Per l'inclinazione pura gli occhi sono precisi quanto il viso.
+Con la testa dritta lo yaw del viso ha uno scarto fisso di qualche grado,
+che dipende dalla calibrazione della camera: le applicazioni lo tolgono con
+il loro punto neutro.
 
 **Calibrazione della camera.** Il firmware non espone i parametri della
 camera. Il driver li stima abbinando il centro di ciascuna iride trovato dal
@@ -532,7 +560,8 @@ Cose misurate sul 4C provato (sessioni del 2026-11-04):
   e lo yaw dell'immagine differiva di 21° da quello degli occhi. Per questo il
   prior sul punto principale è stretto (5 px).
 - **Calibrazione adottata:** errore di 2,8–3,2 px e incertezza di 0,3–0,7°.
-  Yaw e roll dell'immagine coincidono con quelli degli occhi entro 1–3°.
+  Con la testa dritta yaw e roll dell'immagine coincidono con quelli degli
+  occhi entro 1–3°; con la testa girata no (vedi sopra).
 - **Verifica del pitch:** +11° con il mento alzato e −21° con il mento
   abbassato.
 
@@ -540,8 +569,10 @@ Cose misurate sul 4C provato (sessioni del 2026-11-04):
 elaborate, percentuale con il viso, millisecondi per immagine, pitch, e
 soprattutto `yaw_img_minus_eyes_deg` / `roll_img_minus_eyes_deg`. Questi due
 valori sono la differenza tra yaw e roll visti dall'immagine e quelli ricavati
-dagli occhi: vicini a zero vuol dire che camera, modello e display area sono
-coerenti.
+dagli occhi: vicini a zero **con la testa dritta** vuol dire che camera,
+modello e display area sono coerenti. Girando la testa lo scarto dello yaw
+cresce, perché gli occhi lo sottostimano. `yaw_img_deg` e `roll_img_deg` sono
+gli angoli del viso nell'ultima immagine.
 
 ## Output UDP: formato T4CG v2
 
@@ -560,11 +591,11 @@ Un datagramma di **192 byte** per campione, tutto **little-endian**. I primi
 | 32 | `f32×2` | sguardo combinato filtrato, normalizzato [0,1] sulla display area (0,0 = in alto a sinistra) |
 | 40 | `f32×2` | sguardo combinato non filtrato ("responsive") |
 | 48 | `f32×3` | posizione della testa, mm **dal centro dello schermo** (+X destra, +Y su, +Z verso l'utente) |
-| 60 | `f32×3` | rotazione della testa, rad (pitch, yaw, roll) attorno agli assi dello schermo; il pitch è valido (bit 7) solo con la stima dalle immagini attiva |
+| 60 | `f32×3` | rotazione della testa, rad (pitch, yaw, roll) attorno agli assi dello schermo; il pitch è valido (bit 7) solo con la stima dalle immagini attiva, che di default fornisce anche yaw e roll (flag v2, bit 6/7/8) |
 | 72 / 84 | `f32×3` | centro corneale sinistro / destro, mm, sistema del tracker |
 | 96 / 100 | `f32` | diametro pupilla sinistra / destra, mm |
 | 104 / 112 | `f32×2` | punto di sguardo 2D sinistro / destro |
-| 120 | `u32` | flag di validità v2 (bit 0/1 origine schermo L/R, 2/3 track box L/R, 4/5 apertura L/R) |
+| 120 | `u32` | flag di validità v2 (bit 0/1 origine schermo L/R, 2/3 track box L/R, 4/5 apertura L/R, 6/7/8 pitch/yaw/roll della testa dal viso nelle immagini invece che dagli occhi) |
 | 124 | `u8` | presenza: 0 sconosciuta, 1 assente, 2 presente (+ 3 byte a zero) |
 | 128 | `i64` | `presence_us`: orologio del tracker all'ultimo messaggio di presenza (0 = nessuno) |
 | 136 / 148 | `f32×3` | centro corneale sinistro / destro, mm dal centro dello schermo (= `gaze_origin` dello Stream Engine) |
@@ -596,7 +627,8 @@ head_pitch_rad, head_yaw_rad, head_roll_rad, head_valid, pupil_left_mm,
 pupil_right_mm`. Seguono `presence` (0/1/2), `origin_{left,right}_{x,y,z}_mm`
 (sistema dello schermo), `trackbox_{left,right}_{x,y,z}` e
 `openness_{left,right}_mm`, che valgono NaN quando il dato non è valido, come
-`head_pitch_rad` (`head_valid` vale per posizione, yaw e roll). Il
+gli angoli della testa. `head_valid` vale per la posizione: yaw e roll dal
+viso possono essere validi anche quando il tracker vede un occhio solo. Il
 timestamp viene retrodatato all'istante di ricezione USB (`lsl_local_clock() −
 latenza pipeline`).
 
@@ -657,7 +689,9 @@ resumed`.
   con l'utente assente la ricerca del viso non parte. Con una persona davanti
   (2026-11-04): viso trovato nel 100% delle immagini, circa 27 elaborate al
   secondo; calibrazione della camera dall'applicazione guidata; pitch +11° /
-  −21° con il mento alzato e abbassato; yaw e roll coerenti con gli occhi.
+  −21° con il mento alzato e abbassato; yaw e roll coerenti con gli occhi a
+  testa dritta. Girando la testa il viso dà ±31–42°, gli occhi solo 3–10°:
+  da qui `-headpose-rotation image`.
   Un test di regressione copre il bug trovato dal vivo: dopo una ricerca lenta
   il viso deve essere seguito, non ricercato.
 - Installazione da zero (2026-11-04) su una VM Debian 13.7 appena installata,

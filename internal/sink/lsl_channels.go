@@ -8,8 +8,10 @@ import (
 
 // lslChannels: ordine e nomi dei canali dell'outlet LSL (float32). I primi 12
 // sono quelli della prima versione e hanno validità esplicita (gaze_valid,
-// head_valid per posizione, yaw e roll); head_pitch_rad e i canali successivi
-// valgono NaN quando il dato non è valido.
+// head_valid per la posizione); gli angoli della testa e i canali successivi
+// valgono NaN quando il dato non è valido. Yaw e roll possono essere validi
+// con head_valid a 0: vengono dal viso nelle immagini IR anche quando il
+// tracker non vede tutti e due gli occhi.
 var lslChannels = [lslChannelCount]string{
 	"gaze_x", "gaze_y", "gaze_valid",
 	"head_x_mm", "head_y_mm", "head_z_mm", "head_pitch_rad", "head_yaw_rad", "head_roll_rad", "head_valid",
@@ -44,7 +46,7 @@ func lslFill(v *[lslChannelCount]float32, s *gaze.Sample) {
 	*v = [lslChannelCount]float32{
 		s.Gaze[0], s.Gaze[1], b(s.GazeValid),
 		h.PositionMM[0], h.PositionMM[1], h.PositionMM[2],
-		or(h.RotationRad[0], h.RotationValid[0]), h.RotationRad[1], h.RotationRad[2], b(h.PositionValid),
+		or(h.RotationRad[0], h.RotationValid[0]), or(h.RotationRad[1], h.RotationValid[1]), or(h.RotationRad[2], h.RotationValid[2]), b(h.PositionValid),
 		l.PupilMM, r.PupilMM,
 		float32(s.Presence),
 		or(l.OriginDisplayMM[0], l.OriginDisplayValid), or(l.OriginDisplayMM[1], l.OriginDisplayValid), or(l.OriginDisplayMM[2], l.OriginDisplayValid),

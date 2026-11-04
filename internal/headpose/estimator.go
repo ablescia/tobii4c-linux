@@ -40,6 +40,12 @@ type Config struct {
 	MinCutoff  float64       // filtro 1€: taglio a testa ferma, Hz (default 1)
 	Beta       float64       // filtro 1€: crescita del taglio con la velocità (default 0.8)
 
+	// ImageRotation: Observe applica ai campioni anche yaw e roll del viso,
+	// al posto di quelli ricavati dagli occhi (sul 4C lo yaw degli occhi è
+	// sottostimato di circa 5 volte e finisce in parte nel roll). Senza,
+	// applica solo il pitch e yaw e roll dell'immagine servono da controllo.
+	ImageRotation bool
+
 	// ManualCalibration: la camera si calibra solo su richiesta
 	// (CalibrateNow), come fa l'applicazione headpose-calibrate.
 	ManualCalibration bool
@@ -284,7 +290,8 @@ func (e *Estimator) OfferImage(payload []byte, rxNs int64) {
 }
 
 // Observe registra gli occhi di un campione gaze e gli applica l'ultimo
-// pitch disponibile. Chiamata dalla goroutine emitter prima dei sink.
+// pitch disponibile e, con Config.ImageRotation, anche yaw e roll del viso.
+// Chiamata dalla goroutine emitter prima dei sink.
 func (e *Estimator) Observe(s *gaze.Sample) {
 	e.mu.Lock()
 	o := &e.ring[e.ringN%len(e.ring)]
@@ -312,7 +319,12 @@ func (e *Estimator) Observe(s *gaze.Sample) {
 		s.Head.Source = gaze.HeadDerived
 	}
 	s.Head.RotationRad[0] = float32(res.Pitch)
-	s.Head.RotationValid[0] = true
+	s.Head.RotationValid[0], s.Head.RotationImage[0] = true, true
+	if e.cfg.ImageRotation {
+		s.Head.RotationRad[1], s.Head.RotationRad[2] = float32(res.Yaw), float32(res.Roll)
+		s.Head.RotationValid[1], s.Head.RotationValid[2] = true, true
+		s.Head.RotationImage[1], s.Head.RotationImage[2] = true, true
+	}
 }
 
 // Last restituisce l'ultima stima.
