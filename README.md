@@ -199,22 +199,6 @@ Il modello del viso per il pitch della testa (4,9 MB) è nel repository
 scaricato né installato. Per ogni installazione restano da fare solo la
 calibrazione della camera e lo zero personale (`tobii4c headpose-calibrate`).
 
-Con LSL serve liblsl. Debian non la pacchettizza; il `.deb` ufficiale per Ubuntu
-24.04 funziona anche su Debian 13 (provato con la 1.17.7):
-
-```sh
-wget https://github.com/sccn/liblsl/releases/download/v1.17.7/liblsl-1.17.7-noble_amd64.deb
-echo "9cac7570c2b256077b86c011ffa44b7a40344f2271cc353120c387fb9134ddf1  liblsl-1.17.7-noble_amd64.deb" | sha256sum -c -
-sudo apt install ./liblsl-1.17.7-noble_amd64.deb
-make build-lsl      # equivale a: go build -tags lsl ./cmd/tobii4c
-./bin/tobii4c run -lsl &            # outlet "Tobii4C"
-./bin/tobii4c lsl-recv -duration 10s # ricevitore di prova: canali, frequenza, NaN, ritardo
-```
-
-`wget` c'è anche su un'installazione di base, `curl` no. Per installare la
-build con LSL in `~/.local/bin` usa `make install-lsl`: `make install`
-ricompila sempre senza LSL.
-
 ## Permessi senza root (udev)
 
 Come Talon, il driver non richiede root: una regola udev assegna il nodo
@@ -259,11 +243,31 @@ chiama `libusb_detach_kernel_driver` sulle interfacce. Sull'interfaccia 0 di
 solito non è legato nessun driver. Al rilascio libusb ricollega il driver
 dell'interfaccia reclamata.
 
+## Lab Streaming Layer (facoltativo)
+
+Con LSL serve liblsl. Debian non la pacchettizza, ma il `.deb` ufficiale per
+Ubuntu 24.04 funziona anche su Debian 13 (provato con la 1.17.7). Dalla
+cartella del repository, con la regola udev già installata:
+
+```sh
+wget -P /tmp https://github.com/sccn/liblsl/releases/download/v1.17.7/liblsl-1.17.7-noble_amd64.deb
+echo "9cac7570c2b256077b86c011ffa44b7a40344f2271cc353120c387fb9134ddf1  /tmp/liblsl-1.17.7-noble_amd64.deb" | sha256sum -c -
+sudo apt install /tmp/liblsl-1.17.7-noble_amd64.deb
+make build-lsl      # equivale a: go build -tags lsl ./cmd/tobii4c
+./bin/tobii4c run -lsl &             # outlet "Tobii4C"
+./bin/tobii4c lsl-recv -duration 10s # ricevitore di prova: canali, frequenza, NaN, ritardo
+kill %1                              # ferma l'outlet, che tiene occupato il tracker
+```
+
+`wget` c'è anche su un'installazione di base, `curl` no. Per installare la
+build con LSL in `~/.local/bin` usa `make install-lsl`: `make install`
+ricompila sempre senza LSL.
+
 ## Uso
 
 ```sh
 ./bin/tobii4c info                 # identità, catalogo stream, colonne, display area
-./bin/tobii4c info -probe -json report.json
+./bin/tobii4c info -probe -json /tmp/report.json
 ./bin/tobii4c run                  # sguardo, occhi, testa, presenza → UDP 127.0.0.1:5005
 ./bin/tobii4c run -print 500ms -stats 5s
 ./bin/tobii4c run -lsl -udp ""     # solo LSL (build con -tags lsl)
@@ -271,7 +275,7 @@ dell'interfaccia reclamata.
 python3 examples/recv.py           # ricevitore Python, solo libreria standard
 ./bin/tobii4c dump -streams 0x504 -frames 2 -duration 5s   # decodifica generica per reverse engineering
 ./bin/tobii4c dump -images /tmp/ir -frames 0 -duration 3s  # salva frame IR come PGM (due al secondo)
-./bin/tobii4c face /tmp/ir/ir-123.pgm -out viso.png        # modello del viso su un'immagine, PNG annotato
+./bin/tobii4c face "$(ls /tmp/ir/*.pgm | head -1)" -out /tmp/viso.png  # modello del viso su un'immagine, PNG annotato
 ./bin/tobii4c run -print 500ms -headpose-debug /tmp/hp      # pitch con immagini annotate ogni 2 s
 ./bin/tobii4c headpose-calibrate   # app guidata: calibrazione della camera, zero del viso, verifica
 ./bin/tobii4c calibrate            # configurazione a schermo intero (vedi sotto)
