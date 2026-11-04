@@ -170,21 +170,28 @@ proprio envelope.
 ## Build
 
 ```sh
-sudo apt install golang libusb-1.0-0-dev pkg-config   # Go ≥ 1.22
+sudo apt install git make golang libusb-1.0-0-dev pkg-config   # Go ≥ 1.22
+git clone https://github.com/ablescia/tobii4c-linux.git
+cd tobii4c-linux
 make build          # → bin/tobii4c
 make test           # vet + unit test (non richiedono il dispositivo)
 make bench
 ```
 
-In alternativa, senza clonare (servono comunque `libusb-1.0-0-dev` e
-`pkg-config`; il binario va in `$(go env GOPATH)/bin`):
+Su un'installazione di base di Debian 13 mancano sia `git` sia `make`.
+`golang` porta Go 1.24 e, tra i pacchetti raccomandati, `gcc`, che serve a cgo
+per libusb.
+
+In alternativa, senza clonare (servono comunque `golang`, `libusb-1.0-0-dev` e
+`pkg-config`):
 
 ```sh
 go install github.com/ablescia/tobii4c-linux/cmd/tobii4c@latest
+export PATH="$PATH:$(go env GOPATH)/bin"   # ~/go/bin, che Debian non mette nel PATH
 ```
 
-Se il repository è privato, Go deve saltare il proxy pubblico e usare le tue
-credenziali Git (chiave SSH o token):
+Se il repository è privato, Go deve saltare il proxy pubblico e scaricarlo
+con `git` (va installato) e le tue credenziali (chiave SSH o token):
 `GOPRIVATE=github.com/ablescia/* go install …`.
 
 Il modello del viso per il pitch della testa (4,9 MB) è nel repository
@@ -196,13 +203,17 @@ Con LSL serve liblsl. Debian non la pacchettizza; il `.deb` ufficiale per Ubuntu
 24.04 funziona anche su Debian 13 (provato con la 1.17.7):
 
 ```sh
-curl -LO https://github.com/sccn/liblsl/releases/download/v1.17.7/liblsl-1.17.7-noble_amd64.deb
+wget https://github.com/sccn/liblsl/releases/download/v1.17.7/liblsl-1.17.7-noble_amd64.deb
 echo "9cac7570c2b256077b86c011ffa44b7a40344f2271cc353120c387fb9134ddf1  liblsl-1.17.7-noble_amd64.deb" | sha256sum -c -
 sudo apt install ./liblsl-1.17.7-noble_amd64.deb
 make build-lsl      # equivale a: go build -tags lsl ./cmd/tobii4c
 ./bin/tobii4c run -lsl &            # outlet "Tobii4C"
 ./bin/tobii4c lsl-recv -duration 10s # ricevitore di prova: canali, frequenza, NaN, ritardo
 ```
+
+`wget` c'è anche su un'installazione di base, `curl` no. Per installare la
+build con LSL in `~/.local/bin` usa `make install-lsl`: `make install`
+ricompila sempre senza LSL.
 
 ## Permessi senza root (udev)
 
@@ -219,13 +230,29 @@ sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=21
 
 La regola usa `TAG+="uaccess"`: systemd-logind concede un'ACL `rw` all'utente
 della sessione locale attiva. Il prefisso `70-` è obbligatorio, perché
-`uaccess` viene applicato da `73-seat-late.rules`. Nel file ci sono, commentate,
-le alternative `GROUP="plugdev", MODE="0660"` per sistemi headless o via SSH e
-`MODE="0666"`, permissiva e sconsigliata su macchine multiutente. Verifica:
+`uaccess` viene applicato da `73-seat-late.rules`. Verifica (`getfacl` è nel
+pacchetto `acl`, che un'installazione di base non ha):
 
 ```sh
-getfacl /dev/bus/usb/001/002    # deve comparire user:<utente>:rw-
+sudo apt install acl
+getfacl /dev/bus/usb/$(lsusb -d 2104:0127 | awk '{print $2"/"substr($4,1,3)}')
+# deve comparire user:<utente>:rw-
 ```
+
+L'ACL c'è solo finché l'utente ha una **sessione locale attiva**: un desktop o
+un login sulla console. Una sessione SSH da sola non basta, e il driver
+risponde `libusb: bad access`. Per un sistema headless o usato solo via SSH
+c'è nel file, commentata, la variante `GROUP="plugdev", MODE="0660"`. Su
+Debian il primo utente è già nel gruppo `plugdev` (verifica con `id`):
+
+```sh
+sudo sed -i 's/^#\(SUBSYSTEM.*0127.*GROUP="plugdev"\)/\1/' /etc/udev/rules.d/70-tobii-4c.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2104
+```
+
+Nel file c'è anche `MODE="0666"`, permissiva e sconsigliata su macchine
+multiutente.
 
 Il detach del driver kernel avviene tramite `SetAutoDetach(true)` di gousb, che
 chiama `libusb_detach_kernel_driver` sulle interfacce. Sull'interfaccia 0 di
@@ -279,7 +306,20 @@ Flag principali di `run`:
 | `-keymap` | — | mappa colonne JSON alternativa (`tobii4c keymap` stampa quella di default) |
 | `-log-level`, `-log-format` | info, text | `slog`; `json` per l'ingestione strutturata |
 
-Come servizio utente systemd: `make install` e poi `systemd/tobii4c.service`.
+Come servizio utente systemd:
+
+```sh
+make install                # → ~/.local/bin/tobii4c (make install-lsl per LSL)
+install -Dm644 systemd/tobii4c.service ~/.config/systemd/user/tobii4c.service
+systemctl --user daemon-reload
+systemctl --user enable --now tobii4c
+journalctl --user -u tobii4c -f   # log JSON
+```
+
+Debian mette `~/.local/bin` nel `PATH` dalla login successiva, se la cartella
+esiste. Il servizio tiene occupato il tracker: prima di `info`, `calibrate` o
+`headpose-calibrate` va fermato con `systemctl --user stop tobii4c`.
+Altrimenti questi comandi rispondono `device or resource busy`.
 
 ## Come calibrare correttamente
 
@@ -343,8 +383,10 @@ eseguita: se è stata un'altra persona, l'utente rifà il passo 2.
 ## Configurazione e calibrazione
 
 `tobii4c calibrate` apre una finestra a schermo intero sul monitor primario
-(`-monitor HDMI-0` per sceglierne un altro, `-monitors` per elencarli) e
-ripropone i passi dell'applicazione ufficiale Tobii:
+(`-monitor HDMI-0` per sceglierne un altro, `-monitors` per elencarli). Come
+`headpose-calibrate`, richiede una sessione grafica (X11, oppure Wayland con
+XWayland): senza, termina con `connessione a X11 ($DISPLAY)`. Ripropone i
+passi dell'applicazione ufficiale Tobii:
 
 1. **Posiziona il sensore.** Due frecce sul bordo inferiore dello schermo vanno
    allineate ai due segni guida sul tracker. Il 4C dichiara (op 2110) 2 segni a
@@ -397,7 +439,7 @@ Wayland funziona tramite XWayland.
 **Simulazione.** `tobii4c calibrate -simulate` esegue tutto il flusso senza
 tracker: occhi sintetici che ondeggiano, sguardo con latenza saccadica,
 rumore, errore sistematico che il compute riduce e ammiccamenti. Serve a
-provare l'interfaccia, anche su un display virtuale:
+provare l'interfaccia, anche su un display virtuale (`sudo apt install xvfb`):
 `Xvfb :99 & DISPLAY=:99 tobii4c calibrate -simulate`.
 
 ## Pitch della testa
@@ -613,6 +655,17 @@ resumed`.
   −21° con il mento alzato e abbassato; yaw e roll coerenti con gli occhi.
   Un test di regressione copre il bug trovato dal vivo: dopo una ricerca lenta
   il viso deve essere seguito, non ricercato.
+- Installazione da zero (2026-11-04) su una VM Debian 13.7 appena installata,
+  senza desktop (VirtualBox 7.1, 4C in passthrough USB). La procedura di
+  questo README funziona per intero:
+  - build e test;
+  - udev: `uaccess` con un login locale, variante `plugdev` via SSH;
+  - gaze a 90 Hz senza frame persi e immagini IR a 28,6 Hz;
+  - UDP e LSL (90,07 Hz);
+  - `go install`;
+  - servizio systemd;
+  - hotplug con riconnessione;
+  - `camera.json` copiato da un altro computer.
 
 ## Limiti e prossimi passi
 

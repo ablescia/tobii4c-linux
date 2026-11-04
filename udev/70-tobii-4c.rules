@@ -11,7 +11,8 @@
 #   sudo install -m 0644 udev/70-tobii-4c.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2104
-# Verifica (deve comparire una riga "user:<tuo utente>:rw-"):
+# Verifica (deve comparire una riga "user:<tuo utente>:rw-"; getfacl è nel
+# pacchetto acl; con uaccess serve una sessione locale attiva, SSH non basta):
 #   getfacl /dev/bus/usb/$(lsusb -d 2104:0127 | awk '{print $2"/"substr($4,1,3)}')
 
 # --- Tobii Eye Tracker 4C (IS4 "EyeChip") -----------------------------------

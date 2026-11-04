@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -29,6 +31,7 @@ import (
 	"github.com/ablescia/tobii4c-linux/internal/gaze"
 	"github.com/ablescia/tobii4c-linux/internal/ttp"
 	"github.com/ablescia/tobii4c-linux/internal/usbdev"
+	"github.com/ablescia/tobii4c-linux/udev"
 )
 
 // Sink riceve i campioni, in ordine di Seq, dalla sola goroutine emitter.
@@ -184,7 +187,7 @@ func (t *Tracker) Run(ctx context.Context) error {
 		if errors.Is(err, gousb.ErrorAccess) {
 			// Permessi mancanti: riprovare non serve finché non si installa
 			// la regola udev (o si ricollega il dispositivo dopo averla installata).
-			return fmt.Errorf("%w\n  → installa la regola: ./bin/tobii4c udev | sudo tee /etc/udev/rules.d/70-tobii-4c.rules && sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2104", err)
+			return fmt.Errorf("%w\n%s", err, accessHint())
 		}
 		var openErr *usbdev.OpenError
 		if t.opt.FailFast && (errors.As(err, &openErr) || errors.Is(err, usbdev.ErrNotFound)) {
@@ -207,6 +210,22 @@ func (t *Tracker) Run(ctx context.Context) error {
 			backoff = min(backoff*2, t.opt.ReconnectMax)
 		}
 	}
+}
+
+// udevRulePath è dove il README installa la regola udev.
+var udevRulePath = filepath.Join("/etc/udev/rules.d", udev.FileName)
+
+// accessHint spiega come ottenere l'accesso al nodo USB. Senza regola udev
+// propone di installarla; se c'è già, il caso tipico è uaccess senza una
+// sessione locale attiva (solo SSH, sistema headless).
+func accessHint() string {
+	if _, err := os.Stat(udevRulePath); err != nil {
+		return fmt.Sprintf("  → installa la regola: %s udev | sudo tee %s && sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2104",
+			os.Args[0], udevRulePath)
+	}
+	return "  → la regola " + udevRulePath + " c'è, ma non dà accesso a questo utente.\n" +
+		"    Con TAG+=\"uaccess\" serve una sessione locale attiva (desktop o login su console): una sessione SSH non basta.\n" +
+		"    Su un sistema headless o usato via SSH abilita la variante plugdev (README, \"Permessi senza root\")."
 }
 
 // FatalError interrompe Run senza riconnessione.

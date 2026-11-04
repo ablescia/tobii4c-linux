@@ -3,7 +3,7 @@ BIN      ?= bin/tobii4c
 PREFIX   ?= $(HOME)/.local
 GOFLAGS  ?= -trimpath
 
-.PHONY: all build build-lsl test bench race install install-udev uninstall-udev clean
+.PHONY: all build build-lsl test bench race install install-lsl install-udev uninstall-udev clean
 
 all: build
 
@@ -25,6 +25,10 @@ race:
 	go build -race -o bin/tobii4c-race ./cmd/tobii4c
 
 install: build
+	install -Dm755 $(BIN) $(PREFIX)/bin/tobii4c
+
+# Come install, ma con il supporto LSL (`install` ricompila sempre senza).
+install-lsl: build-lsl
 	install -Dm755 $(BIN) $(PREFIX)/bin/tobii4c
 
 install-udev:

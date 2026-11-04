@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/gousb"
@@ -146,8 +147,8 @@ func Open(conf Config, log *slog.Logger) (_ *Device, err error) {
 		return nil, fmt.Errorf("config %d (detach kernel driver): %w", cfgNum, err)
 	}
 	if d.intf, err = d.cfg.Interface(conf.Interface, 0); err != nil {
-		if errors.Is(err, gousb.ErrorBusy) {
-			return nil, fmt.Errorf("claim interface %d: %w — un altro processo (tobiiusbserviced, Talon, un'altra istanza?) tiene il tracker", conf.Interface, err)
+		if isBusy(err) {
+			return nil, fmt.Errorf("claim interface %d: %w — un altro processo tiene il tracker (il servizio: systemctl --user stop tobii4c; un'altra istanza, Talon, tobiiusbserviced?)", conf.Interface, err)
 		}
 		return nil, fmt.Errorf("claim interface %d: %w", conf.Interface, err)
 	}
@@ -236,4 +237,11 @@ func IsDisconnect(err error) bool {
 	return errors.Is(err, gousb.ErrorNoDevice) || errors.Is(err, gousb.ErrorIO) ||
 		errors.Is(err, gousb.TransferNoDevice) || errors.Is(err, gousb.ErrorPipe) ||
 		errors.Is(err, gousb.TransferStall)
+}
+
+// isBusy riconosce LIBUSB_ERROR_BUSY anche quando gousb non lo avvolge:
+// Config.Interface lo formatta con %v ("failed to claim interface …: libusb:
+// device or resource busy [code -6]"), quindi errors.Is da solo non basta.
+func isBusy(err error) bool {
+	return errors.Is(err, gousb.ErrorBusy) || strings.Contains(err.Error(), gousb.ErrorBusy.Error())
 }
