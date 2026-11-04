@@ -175,7 +175,10 @@ proprio envelope.
 ## Build
 
 ```sh
+# Debian / Ubuntu:
 sudo apt install git make golang libusb-1.0-0-dev pkg-config   # Go ≥ 1.22
+# Arch / Omarchy:
+sudo pacman -S --needed git base-devel go libusb pkgconf       # Go ≥ 1.22
 git clone https://github.com/ablescia/tobii4c-linux.git
 cd tobii4c-linux
 make build          # → bin/tobii4c
@@ -185,14 +188,18 @@ make bench
 
 Su un'installazione di base di Debian 13 mancano sia `git` sia `make`.
 `golang` porta Go 1.24 e, tra i pacchetti raccomandati, `gcc`, che serve a cgo
-per libusb.
+per libusb. Su Arch (e quindi su Omarchy) `base-devel` fornisce `make`, `gcc` e
+`pkgconf`, mentre il pacchetto `libusb` include gli header di libusb-1.0; niente
+nel driver dipende dalla distribuzione, solo queste dipendenze e, a runtime,
+udev/systemd (presenti su entrambe).
 
-In alternativa, senza clonare (servono comunque `golang`, `libusb-1.0-0-dev` e
-`pkg-config`):
+In alternativa, senza clonare (servono comunque Go, libusb-1.0 con i suoi header
+e pkg-config: `golang`/`libusb-1.0-0-dev`/`pkg-config` su Debian, `go`/`libusb`/
+`pkgconf` su Arch):
 
 ```sh
 go install github.com/ablescia/tobii4c-linux/cmd/tobii4c@latest
-export PATH="$PATH:$(go env GOPATH)/bin"   # ~/go/bin, che Debian non mette nel PATH
+export PATH="$PATH:$(go env GOPATH)/bin"   # ~/go/bin, che né Debian né Arch mettono nel PATH
 ```
 
 Se il repository è privato, Go deve saltare il proxy pubblico e scaricarlo
@@ -223,18 +230,22 @@ della sessione locale attiva. Il prefisso `70-` è obbligatorio, perché
 pacchetto `acl`, che un'installazione di base non ha):
 
 ```sh
-sudo apt install acl
+sudo apt install acl   # Debian; su Arch/Omarchy `acl` è già presente (dipendenza di systemd)
 getfacl /dev/bus/usb/$(lsusb -d 2104:0127 | awk '{print $2"/"substr($4,1,3)}')
 # deve comparire user:<utente>:rw-
 ```
 
-L'ACL c'è solo finché l'utente ha una **sessione locale attiva**: un desktop o
-un login sulla console. Una sessione SSH da sola non basta, e il driver
-risponde `libusb: bad access`. Per un sistema headless o usato solo via SSH
-c'è nel file, commentata, la variante `GROUP="plugdev", MODE="0660"`. Su
-Debian il primo utente è già nel gruppo `plugdev` (verifica con `id`):
+L'ACL c'è solo finché l'utente ha una **sessione locale attiva**: un desktop
+(anche un compositor Wayland come Hyprland su Omarchy) o un login sulla console.
+Una sessione SSH da sola non basta, e il driver risponde `libusb: bad access`.
+Per un sistema headless o usato solo via SSH c'è nel file, commentata, la
+variante `GROUP="plugdev", MODE="0660"`. Su Debian il primo utente è già nel
+gruppo `plugdev` (verifica con `id`); su Arch/Omarchy il gruppo non esiste di
+default e va creato, aggiungendovi l'utente (il nuovo gruppo ha effetto dal
+login successivo):
 
 ```sh
+sudo groupadd -f plugdev && sudo gpasswd -a "$USER" plugdev   # solo Arch/Omarchy: il gruppo non c'è
 sudo sed -i 's/^#\(SUBSYSTEM.*0127.*GROUP="plugdev"\)/\1/' /etc/udev/rules.d/70-tobii-4c.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2104
@@ -251,8 +262,11 @@ dell'interfaccia reclamata.
 ## Lab Streaming Layer (facoltativo)
 
 Con LSL serve liblsl. Debian non la pacchettizza, ma il `.deb` ufficiale per
-Ubuntu 24.04 funziona anche su Debian 13 (provato con la 1.17.7). Dalla
-cartella del repository, con la regola udev già installata:
+Ubuntu 24.04 funziona anche su Debian 13 (provato con la 1.17.7). Su Arch e
+Omarchy liblsl è nell'AUR (pacchetto `liblsl`): `yay -S liblsl` (o un altro
+helper AUR) installa header e `.so`, e al suo posto si salta direttamente a
+`make build-lsl`. Dalla cartella del repository, con la regola udev già
+installata:
 
 ```sh
 wget -P /tmp https://github.com/sccn/liblsl/releases/download/v1.17.7/liblsl-1.17.7-noble_amd64.deb
@@ -327,7 +341,10 @@ journalctl --user -u tobii4c -f   # log JSON
 ```
 
 Debian mette `~/.local/bin` nel `PATH` dalla login successiva, se la cartella
-esiste. Il servizio tiene occupato il tracker: prima di `info`, `calibrate` o
+esiste; su Arch/Omarchy dipende dalla shell e dal profilo, quindi conviene
+verificarlo con `echo $PATH` (o usare il percorso completo). Il servizio
+`tobii4c.service` è un'unit utente standard: `systemctl --user` funziona
+identico su entrambe. Il servizio tiene occupato il tracker: prima di `info`, `calibrate` o
 `headpose-calibrate` va fermato con `systemctl --user stop tobii4c`.
 Altrimenti questi comandi rispondono `device or resource busy`.
 
@@ -449,7 +466,8 @@ Wayland funziona tramite XWayland.
 **Simulazione.** `tobii4c calibrate -simulate` esegue tutto il flusso senza
 tracker: occhi sintetici che ondeggiano, sguardo con latenza saccadica,
 rumore, errore sistematico che il compute riduce e ammiccamenti. Serve a
-provare l'interfaccia, anche su un display virtuale (`sudo apt install xvfb`):
+provare l'interfaccia, anche su un display virtuale (`sudo apt install xvfb`,
+su Arch/Omarchy `sudo pacman -S xorg-server-xvfb`):
 `Xvfb :99 & DISPLAY=:99 tobii4c calibrate -simulate`.
 
 ## Pitch della testa
