@@ -32,7 +32,10 @@ type SimDevice struct {
 	visible bool
 	shownAt time.Time
 	gaze    [2]float64
-	bias    [2]float64
+	// lastSample: la dinamica dello sguardo segue il tempo trascorso, non il
+	// numero di campioni: con la CPU carica il ticker salta dei tick.
+	lastSample time.Time
+	bias       [2]float64
 	// uncalibrated: dopo il clear e fino al primo compute il 4C reale non
 	// fornisce sguardo (osservato: il primo punto non può essere verificato).
 	uncalibrated bool
@@ -179,8 +182,13 @@ func (d *SimDevice) sample(seq uint64, now time.Time, t float64) *gaze.Sample {
 	if d.visible && now.Sub(d.shownAt) > 180*time.Millisecond {
 		goal = d.target
 	}
+	dt := 1.0 / 90
+	if !d.lastSample.IsZero() {
+		dt = min(max(now.Sub(d.lastSample).Seconds(), 0), 0.25)
+	}
+	d.lastSample = now
 	for k := 0; k < 2; k++ {
-		d.gaze[k] += (goal[k] - d.gaze[k]) * (1 - math.Exp(-(1.0/90)/0.06))
+		d.gaze[k] += (goal[k] - d.gaze[k]) * (1 - math.Exp(-dt/0.06))
 	}
 	if !blink && !d.uncalibrated {
 		s.GazeValid, s.GazeRawValid = true, true

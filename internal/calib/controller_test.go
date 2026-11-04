@@ -20,7 +20,11 @@ func setup(t *testing.T) (*Controller, *SimDevice, context.Context) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := DefaultConfig()
 	cfg.FocusSettle = 80 * time.Millisecond
-	cfg.NoGazeDwell = 150 * time.Millisecond
+	// NoGazeDwell deve superare BlinkTolerance (200 ms), come in produzione
+	// (900 ms): un buco nei dati più corto della tolleranza (ammiccamento del
+	// simulatore, 120 ms in tempo reale, più i ritardi dello scheduler) lascia
+	// gli occhi "visti" senza sguardo, e con 150 ms diventava un dwell.
+	cfg.NoGazeDwell = 400 * time.Millisecond
 	// La dinamica dello sguardo simulato non è accelerata da TimeScale
 	// (latenza saccadica 180 ms, costante di tempo 60 ms): con meno di ~400 ms
 	// la media della finestra include ancora la transizione dal punto precedente.
