@@ -124,7 +124,8 @@ func (s *Session) handshake() error {
 	if err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
-	l.Info("ttp hello ok", "protocol", fmtU32s(ttp.ParseU32s(p)), "status", h.Status)
+	s.Protocol = ttp.ParseU32s(p)
+	l.Info("ttp hello ok", "protocol", fmtU32s(s.Protocol), "status", h.Status)
 
 	if _, p, err := s.Request(ttp.OpDeviceStrings, nil); err == nil {
 		s.DeviceStrings = ttp.ParseStrings(p)
@@ -134,7 +135,8 @@ func (s *Session) handshake() error {
 	}
 
 	if _, p, err := s.Request(ttp.OpQueryRealm, nil); err == nil {
-		l.Info("realm query", "values", fmtU32s(ttp.ParseU32s(p)))
+		s.Realm = ttp.ParseU32s(p)
+		l.Info("realm query", "values", fmtU32s(s.Realm))
 	} else {
 		l.Debug("realm query (0x640) failed", "err", err)
 	}
@@ -230,11 +232,20 @@ func (s *Session) subscribeAll() error {
 	s.subscribed.Store(true)
 	s.lastGazeNs.Store(time.Now().UnixNano())
 	s.log.Info("subscribed", "stream", "0x500 gaze")
+	s.infoMu.Lock()
+	s.Subscribed = append(s.Subscribed[:0], ttp.StreamGaze)
+	s.infoMu.Unlock()
 	for _, id := range s.t.secondaryStreams() {
 		if _, _, err := s.Request(ttp.OpStreamStart, ttp.StreamStartPayload(id)); err != nil {
 			s.log.Warn("subscribe extra stream failed", "stream", hex(id), "err", err)
+			s.infoMu.Lock()
+			s.SubscribeErrors[id] = err
+			s.infoMu.Unlock()
 		} else {
 			s.log.Info("subscribed", "stream", hex(id))
+			s.infoMu.Lock()
+			s.Subscribed = append(s.Subscribed, id)
+			s.infoMu.Unlock()
 			if id == ttp.StreamImage {
 				s.images.on = true
 			}

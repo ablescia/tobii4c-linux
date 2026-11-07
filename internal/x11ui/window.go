@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"os"
 	"time"
 
 	"github.com/jezek/xgb"
@@ -39,6 +40,7 @@ const (
 	MouseMove
 	Expose
 	Closed
+	Resize // la finestra ha cambiato dimensione: nuova misura in W, H
 )
 
 // Keysym X11 usati dall'interfaccia.
@@ -62,6 +64,7 @@ type Event struct {
 	Shift, Ctrl, Alt bool
 	X, Y             int // coordinate nella finestra
 	Button           int
+	W, H             int // Resize: nuova dimensione
 }
 
 // Window è una finestra override-redirect che copre un monitor.
@@ -81,6 +84,12 @@ type Window struct {
 	syms   []xproto.Keysym
 	buf    []byte
 	closed chan struct{}
+
+	managed     bool // finestra normale (OpenWindow), non a schermo intero
+	root        xproto.Window
+	fullscreen  bool
+	wmProtocols xproto.Atom // WM_PROTOCOLS
+	wmDelete    xproto.Atom // WM_DELETE_WINDOW: chiusura dal window manager
 }
 
 // Connect apre la connessione al server X ($DISPLAY).
@@ -143,13 +152,13 @@ func Monitors(c *xgb.Conn) ([]Monitor, error) {
 	return out, nil
 }
 
-// Open crea la finestra sul monitor m, prende la tastiera e nasconde nulla:
-// il cursore si gestisce con ShowCursor.
-func Open(c *xgb.Conn, m Monitor, bg uint32) (*Window, error) {
+// checkScreen verifica che lo schermo predefinito sia TrueColor a 32 bpp
+// little-endian, l'unico formato che Present sa caricare.
+func checkScreen(c *xgb.Conn) (*xproto.SetupInfo, *xproto.ScreenInfo, error) {
 	setup := xproto.Setup(c)
 	scr := setup.DefaultScreen(c)
 	if setup.ImageByteOrder != xproto.ImageOrderLSBFirst {
-		return nil, errors.New("x11: byte order MSB non supportato")
+		return nil, nil, errors.New("x11: byte order MSB non supportato")
 	}
 	bpp := 0
 	for _, f := range setup.PixmapFormats {
@@ -158,11 +167,183 @@ func Open(c *xgb.Conn, m Monitor, bg uint32) (*Window, error) {
 		}
 	}
 	if scr.RootDepth != 24 && scr.RootDepth != 32 || bpp != 32 {
-		return nil, fmt.Errorf("x11: profondità %d/%d bpp non supportata (serve TrueColor 24/32)", scr.RootDepth, bpp)
+		return nil, nil, fmt.Errorf("x11: profondità %d/%d bpp non supportata (serve TrueColor 24/32)", scr.RootDepth, bpp)
+	}
+	return setup, scr, nil
+}
+
+// loadKeymap legge la tabella keycode → keysym.
+func (w *Window) loadKeymap(setup *xproto.SetupInfo) error {
+	km, err := xproto.GetKeyboardMapping(w.conn, setup.MinKeycode, byte(setup.MaxKeycode-setup.MinKeycode+1)).Reply()
+	if err != nil {
+		return fmt.Errorf("x11: keyboard mapping: %w", err)
+	}
+	w.minKC, w.perKC, w.syms = setup.MinKeycode, int(km.KeysymsPerKeycode), km.Keysyms
+	return nil
+}
+
+func setString(c *xgb.Conn, win xproto.Window, prop, typ xproto.Atom, v string) {
+	xproto.ChangeProperty(c, xproto.PropModeReplace, win, prop, typ, 8, uint32(len(v)), []byte(v))
+}
+
+func atom(c *xgb.Conn, name string) xproto.Atom {
+	r, err := xproto.InternAtom(c, false, uint16(len(name)), name).Reply()
+	if err != nil || r == nil {
+		return 0
+	}
+	return r.Atom
+}
+
+// WindowOptions configura una finestra normale (OpenWindow).
+type WindowOptions struct {
+	Title      string
+	Class      string // WM_CLASS: permette regole del window manager (es. windowrule di Hyprland)
+	X, Y       int    // posizione iniziale (il window manager può ignorarla)
+	W, H       int    // dimensione iniziale
+	MinW, MinH int    // dimensione minima suggerita al window manager
+	Background uint32 // 0xRRGGBB
+	Maximized  bool   // chiede di aprirla massimizzata (_NET_WM_STATE)
+	Fullscreen bool   // chiede di aprirla a schermo intero
+}
+
+// OpenWindow crea una finestra normale, gestita dal window manager: ha un
+// titolo, si sposta e si ridimensiona (eventi Resize), si chiude dal window
+// manager (evento Closed) e riceve la tastiera solo quando ha il fuoco.
+func OpenWindow(c *xgb.Conn, o WindowOptions) (*Window, error) {
+	setup, scr, err := checkScreen(c)
+	if err != nil {
+		return nil, err
+	}
+	o.W, o.H = max(o.W, 1), max(o.H, 1)
+	w := &Window{W: o.W, H: o.H, Monitor: Monitor{Name: "window", W: o.W, H: o.H}, conn: c, depth: scr.RootDepth,
+		maxReq: int(setup.MaximumRequestLength) * 4, Events: make(chan Event, 256), closed: make(chan struct{}),
+		managed: true}
+	if w.win, err = xproto.NewWindowId(c); err != nil {
+		return nil, err
+	}
+	events := uint32(xproto.EventMaskKeyPress | xproto.EventMaskButtonPress | xproto.EventMaskButtonRelease |
+		xproto.EventMaskPointerMotion | xproto.EventMaskExposure | xproto.EventMaskStructureNotify)
+	if err := xproto.CreateWindowChecked(c, scr.RootDepth, w.win, scr.Root, int16(o.X), int16(o.Y), uint16(o.W), uint16(o.H), 0,
+		xproto.WindowClassInputOutput, scr.RootVisual, xproto.CwBackPixel|xproto.CwEventMask,
+		[]uint32{o.Background, events}).Check(); err != nil {
+		return nil, fmt.Errorf("x11: create window: %w", err)
+	}
+	setString(c, w.win, xproto.AtomWmName, xproto.AtomString, o.Title)
+	if a, u := atom(c, "_NET_WM_NAME"), atom(c, "UTF8_STRING"); a != 0 && u != 0 {
+		setString(c, w.win, a, u, o.Title)
+	}
+	if o.Class != "" {
+		setString(c, w.win, xproto.AtomWmClass, xproto.AtomString, o.Class+"\x00"+o.Class+"\x00")
+	}
+	if pid := atom(c, "_NET_WM_PID"); pid != 0 {
+		v := uint32(os.Getpid())
+		xproto.ChangeProperty(c, xproto.PropModeReplace, w.win, pid, xproto.AtomCardinal, 32, 1,
+			[]byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)})
+	}
+	// Stato iniziale: secondo EWMH il client lo imposta prima della mappatura.
+	w.root = scr.Root
+	var states []string
+	if o.Maximized {
+		states = append(states, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ")
+	}
+	if o.Fullscreen {
+		states = append(states, "_NET_WM_STATE_FULLSCREEN")
+		w.fullscreen = true
+	}
+	if st := atom(c, "_NET_WM_STATE"); st != 0 && len(states) > 0 {
+		var b []byte
+		for _, name := range states {
+			a := atom(c, name)
+			b = append(b, byte(a), byte(a>>8), byte(a>>16), byte(a>>24))
+		}
+		xproto.ChangeProperty(c, xproto.PropModeReplace, w.win, st, xproto.AtomAtom, 32, uint32(len(states)), b)
+	}
+	// WM_NORMAL_HINTS: 18 CARD32, flag PMinSize (16) con min_width/min_height.
+	if o.MinW > 0 && o.MinH > 0 {
+		hints := make([]byte, 18*4)
+		put := func(i int, v uint32) {
+			hints[4*i], hints[4*i+1], hints[4*i+2], hints[4*i+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+		}
+		put(0, 16)
+		put(5, uint32(o.MinW))
+		put(6, uint32(o.MinH))
+		xproto.ChangeProperty(c, xproto.PropModeReplace, w.win, xproto.AtomWmNormalHints, xproto.AtomWmSizeHints, 32, 18, hints)
+	}
+	w.wmProtocols, w.wmDelete = atom(c, "WM_PROTOCOLS"), atom(c, "WM_DELETE_WINDOW")
+	if w.wmProtocols != 0 && w.wmDelete != 0 {
+		d := uint32(w.wmDelete)
+		xproto.ChangeProperty(c, xproto.PropModeReplace, w.win, w.wmProtocols, xproto.AtomAtom, 32, 1,
+			[]byte{byte(d), byte(d >> 8), byte(d >> 16), byte(d >> 24)})
+	}
+	if w.gc, err = xproto.NewGcontextId(c); err != nil {
+		return nil, err
+	}
+	xproto.CreateGC(c, w.gc, xproto.Drawable(w.win), 0, nil)
+	if err := xproto.MapWindowChecked(c, w.win).Check(); err != nil {
+		return nil, fmt.Errorf("x11: map: %w", err)
+	}
+	// Alcuni window manager leggono lo stato solo dalla richiesta EWMH a
+	// finestra mappata: si manda anche quella. (Omarchy ignora apposta le
+	// richieste di massimizzazione: lì resta lo schermo intero, vedi
+	// SetFullscreen.)
+	if o.Maximized {
+		w.requestState(1, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ")
+	}
+	if o.Fullscreen {
+		w.requestState(1, "_NET_WM_STATE_FULLSCREEN")
+	}
+	if err := w.loadKeymap(setup); err != nil {
+		w.Close()
+		return nil, err
+	}
+	go w.loop()
+	return w, nil
+}
+
+// requestState chiede al window manager di cambiare _NET_WM_STATE (action:
+// 0 togli, 1 aggiungi, 2 alterna) per uno o due stati.
+func (w *Window) requestState(action uint32, states ...string) {
+	st := atom(w.conn, "_NET_WM_STATE")
+	if st == 0 || len(states) == 0 {
+		return
+	}
+	var d [5]uint32
+	d[0] = action
+	for i, name := range states[:min(2, len(states))] {
+		d[1+i] = uint32(atom(w.conn, name))
+	}
+	d[3] = 1 // richiesta di un'applicazione normale
+	ev := xproto.ClientMessageEvent{Format: 32, Window: w.win, Type: st, Data: xproto.ClientMessageDataUnionData32New(d[:])}
+	xproto.SendEvent(w.conn, false, w.root, xproto.EventMaskSubstructureRedirect|xproto.EventMaskSubstructureNotify, string(ev.Bytes()))
+	xproto.GetInputFocus(w.conn).Reply() // la richiesta parte subito
+}
+
+// SetFullscreen chiede al window manager lo schermo intero (o di uscirne).
+// Solo per le finestre di OpenWindow.
+func (w *Window) SetFullscreen(on bool) {
+	if !w.managed {
+		return
+	}
+	action := uint32(0)
+	if on {
+		action = 1
+	}
+	w.fullscreen = on
+	w.requestState(action, "_NET_WM_STATE_FULLSCREEN")
+}
+
+// Fullscreen dice se l'ultima richiesta è stata lo schermo intero.
+func (w *Window) Fullscreen() bool { return w.fullscreen }
+
+// Open crea la finestra sul monitor m, prende la tastiera e nasconde nulla:
+// il cursore si gestisce con ShowCursor.
+func Open(c *xgb.Conn, m Monitor, bg uint32) (*Window, error) {
+	setup, scr, err := checkScreen(c)
+	if err != nil {
+		return nil, err
 	}
 	w := &Window{W: m.W, H: m.H, Monitor: m, conn: c, depth: scr.RootDepth,
 		maxReq: int(setup.MaximumRequestLength) * 4, Events: make(chan Event, 256), closed: make(chan struct{})}
-	var err error
 	if w.win, err = xproto.NewWindowId(c); err != nil {
 		return nil, err
 	}
@@ -210,12 +391,10 @@ func Open(c *xgb.Conn, m Monitor, bg uint32) (*Window, error) {
 	}
 	xproto.SetInputFocus(c, xproto.InputFocusParent, w.win, xproto.TimeCurrentTime)
 
-	km, err := xproto.GetKeyboardMapping(c, setup.MinKeycode, byte(setup.MaxKeycode-setup.MinKeycode+1)).Reply()
-	if err != nil {
+	if err := w.loadKeymap(setup); err != nil {
 		w.Close()
-		return nil, fmt.Errorf("x11: keyboard mapping: %w", err)
+		return nil, err
 	}
-	w.minKC, w.perKC, w.syms = setup.MinKeycode, int(km.KeysymsPerKeycode), km.Keysyms
 	go w.loop()
 	return w, nil
 }
@@ -241,6 +420,7 @@ func (w *Window) send(e Event) {
 
 func (w *Window) loop() {
 	defer close(w.closed)
+	curW, curH := w.W, w.H
 	for {
 		ev, err := w.conn.WaitForEvent()
 		if ev == nil && err == nil {
@@ -248,6 +428,13 @@ func (w *Window) loop() {
 			return
 		}
 		switch e := ev.(type) {
+		case xproto.MappingNotifyEvent:
+			// la tabella dei tasti è cambiata (layout, tastiere virtuali)
+			if e.Request == xproto.MappingKeyboard {
+				if setup := xproto.Setup(w.conn); setup != nil {
+					_ = w.loadKeymap(setup)
+				}
+			}
 		case xproto.KeyPressEvent:
 			st := e.State
 			w.send(Event{Kind: KeyDown, Sym: w.keysym(e.Detail, st&xproto.ModMaskShift != 0),
@@ -262,10 +449,29 @@ func (w *Window) loop() {
 			if e.Count == 0 {
 				w.send(Event{Kind: Expose})
 			}
+		case xproto.ConfigureNotifyEvent:
+			if e.Window == w.win && (int(e.Width) != curW || int(e.Height) != curH) {
+				curW, curH = int(e.Width), int(e.Height)
+				w.sendResize(curW, curH)
+			}
+		case xproto.ClientMessageEvent:
+			if w.wmDelete != 0 && e.Type == w.wmProtocols && e.Format == 32 && xproto.Atom(e.Data.Data32[0]) == w.wmDelete {
+				w.send(Event{Kind: Closed})
+			}
 		case xproto.DestroyNotifyEvent:
 			w.send(Event{Kind: Closed})
 			return
 		}
+	}
+}
+
+// sendResize consegna un Resize anche con la coda piena (il ridimensionamento
+// non si può perdere: l'interfaccia ridisegnerebbe alla misura vecchia).
+func (w *Window) sendResize(width, height int) {
+	ev := Event{Kind: Resize, W: width, H: height}
+	select {
+	case w.Events <- ev:
+	case <-time.After(time.Second):
 	}
 }
 
@@ -314,7 +520,9 @@ func (w *Window) Present(img *image.RGBA, rects ...image.Rectangle) error {
 
 // Close rilascia tastiera e finestra.
 func (w *Window) Close() {
-	xproto.UngrabKeyboard(w.conn, xproto.TimeCurrentTime)
+	if !w.managed {
+		xproto.UngrabKeyboard(w.conn, xproto.TimeCurrentTime)
+	}
 	xproto.DestroyWindow(w.conn, w.win)
 	xproto.GetInputFocus(w.conn).Reply()
 }

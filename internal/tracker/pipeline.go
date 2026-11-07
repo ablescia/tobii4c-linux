@@ -312,6 +312,12 @@ type Session struct {
 	Catalogue     []ttp.Record
 	Columns       map[uint32][]ttp.Record
 	Display       *ttp.DisplayArea
+	Protocol      []uint32 // risposta a hello (versione del protocollo)
+	Realm         []uint32 // risposta alla query realm (0 = nessuna autenticazione)
+	// Esito delle sottoscrizioni: stream accettati, nell'ordine, e rifiutati
+	// con l'errore del dispositivo.
+	Subscribed      []uint32
+	SubscribeErrors map[uint32]error
 }
 
 func (t *Tracker) runSession(parent context.Context) error {
@@ -324,16 +330,17 @@ func (t *Tracker) runSession(parent context.Context) error {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	s := &Session{
 		t: t, dev: dev, log: t.log, ctx: ctx, cancel: cancel, parent: parent,
-		wbuf:       make([]byte, 0, 512),
-		pending:    map[uint32]chan response{},
-		rawFree:    make(chan []byte, t.opt.RawBuffers),
-		rawCh:      make(chan rawChunk, t.opt.RawQueue),
-		frameFree:  make(chan *frameBuf, t.opt.FramePool),
-		jobs:       make(chan job, t.opt.FramePool),
-		results:    make(chan result, t.opt.FramePool),
-		Columns:    map[uint32][]ttp.Record{},
-		presenceCh: make(chan gaze.Presence, 1),
-		firstSeq:   t.seq,
+		wbuf:            make([]byte, 0, 512),
+		pending:         map[uint32]chan response{},
+		rawFree:         make(chan []byte, t.opt.RawBuffers),
+		rawCh:           make(chan rawChunk, t.opt.RawQueue),
+		frameFree:       make(chan *frameBuf, t.opt.FramePool),
+		jobs:            make(chan job, t.opt.FramePool),
+		results:         make(chan result, t.opt.FramePool),
+		Columns:         map[uint32][]ttp.Record{},
+		SubscribeErrors: map[uint32]error{},
+		presenceCh:      make(chan gaze.Presence, 1),
+		firstSeq:        t.seq,
 	}
 	for i := 0; i < t.opt.RawBuffers; i++ {
 		s.rawFree <- make([]byte, t.opt.USB.TransferSize)

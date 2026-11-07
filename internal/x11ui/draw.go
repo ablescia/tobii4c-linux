@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gomedium"
+	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
@@ -193,6 +194,17 @@ type Fonts struct {
 	Title, Heading, Body, Small, Key, Big *Font
 }
 
+// TTF dei caratteri incorporati (Go, di Bigelow & Holmes).
+var (
+	TTFRegular = goregular.TTF
+	TTFMedium  = gomedium.TTF
+	TTFMono    = gomono.TTF
+)
+
+// NewFont prepara il carattere ttf alla dimensione size (pixel). Le maschere
+// dei glifi restano in una cache: un Font va usato da una sola goroutine.
+func NewFont(ttf []byte, size float64) (*Font, error) { return newFont(ttf, size) }
+
 func newFont(ttf []byte, size float64) (*Font, error) {
 	f, err := opentype.Parse(ttf)
 	if err != nil {
@@ -203,7 +215,7 @@ func newFont(ttf []byte, size float64) (*Font, error) {
 		return nil, err
 	}
 	m := face.Metrics()
-	return &Font{face: face, Ascent: m.Ascent.Ceil(), Desc: m.Descent.Ceil(), Height: m.Height.Ceil()}, nil
+	return &Font{face: newCachedFace(face), Ascent: m.Ascent.Ceil(), Desc: m.Descent.Ceil(), Height: m.Height.Ceil()}, nil
 }
 
 // LoadFonts prepara la scala tipografica per uno schermo alto h pixel.

@@ -55,3 +55,16 @@ func TestDecodeRejects(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendPayloadRoundTrip(t *testing.T) {
+	f := &Frame{DeviceUs: 74709605964, W: 4, H: 3, Pix: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}}
+	p := AppendPayload(nil, f)
+	var row ttp.Row
+	var g Frame
+	if err := DecodePayload(p, &row, &g); err != nil {
+		t.Fatal(err)
+	}
+	if g.DeviceUs != f.DeviceUs || g.W != 4 || g.H != 3 || string(g.Pix) != string(f.Pix) || row.Declared != 5 {
+		t.Fatalf("round trip: %+v (declared %d)", g, row.Declared)
+	}
+}

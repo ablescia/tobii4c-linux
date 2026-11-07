@@ -33,7 +33,7 @@ Go ≥ 1.22. The LSL sink (`internal/sink/lsl*.go`) and its `lsl-recv` command a
 
 ## Running / debugging on the device
 
-The driver needs exclusive USB access, so **stop the systemd user service first** (`systemctl --user stop tobii4c`) or device commands fail with `device or resource busy`. USB access without root comes from the udev rule (`uaccess` ACL requires an *active local session*, not SSH-only). Key subcommands (all in `cmd/tobii4c/`): `run`, `info`, `dump` (generic decode / IR frame capture for reverse engineering), `recv` (test UDP receiver), `calibrate`, `headpose-calibrate`, `calibration save|apply|restore`, `display`, `face`, `lsl-recv`, `udev`, `keymap`. `calibrate -simulate` and `headpose-calibrate` run the full-screen UIs without hardware (use Xvfb for headless).
+The driver needs exclusive USB access, so **stop the systemd user service first** (`systemctl --user stop tobii4c`) or device commands fail with `device or resource busy`. USB access without root comes from the udev rule (`uaccess` ACL requires an *active local session*, not SSH-only). Key subcommands (all in `cmd/tobii4c/`): `run`, `info`, `dump` (generic decode / IR frame capture for reverse engineering), `recv` (test UDP receiver), `calibrate`, `headpose-calibrate`, `calibration save|apply|restore`, `display`, `face`, `lsl-recv`, `telemetry`, `udev`, `keymap`. `calibrate -simulate`, `telemetry -simulate` and `headpose-calibrate` run the UIs without hardware (use Xvfb for headless). `telemetry` runs the driver inside a normal (managed) X11 window and, before opening the device, finds any user systemd service holding the USB node (via `/proc/*/fd` + cgroup) and asks in-window to stop it, restarting it on exit. Its dashboard renders to an `*image.RGBA` without X: `TOBII4C_TELEMETRY_PNG=<dir> TOBII4C_FACE_IMAGE=<pgm> go test ./internal/telemetry -run TestRender` saves screenshots for visual checks; `-autoshot`/`-duration` do the same live.
 
 Unit tests never touch the device; they replay real ET5 USB captures in `internal/ttp/testdata/` (MIT-licensed) and assert bit-exact decode against Stream Engine output.
 
@@ -69,11 +69,12 @@ Buffers return to their pool only *after* emission, which bounds in-flight frame
 | `internal/tracker` | the concurrent pipeline, handshake, watchdog, reconnection |
 | `internal/sink` | UDP (T4CG v2 packet), LSL (cgo, `lsl` tag), stdout |
 | `internal/calib` | gaze calibration: fixation, collect, compute, backup/restore, accuracy metrics, simulator |
-| `internal/calibui`, `internal/x11ui` | full-screen calibration UI; pure-Go X11 window (`jezek/xgb`, RandR/EDID/antialiased drawing) |
+| `internal/calibui`, `internal/x11ui` | full-screen calibration UI; pure-Go X11 windows (`jezek/xgb`): full-screen override-redirect (`Open`) or managed/resizable (`OpenWindow`), RandR/EDID, antialiased drawing, glyph cache |
 | `internal/irimg` | 0x501 image-stream decode, PGM |
 | `internal/nn` | minimal pure-Go ONNX interpreter (subset of ops) with AVX2/FMA asm kernels |
 | `internal/headpose` | face landmarks, canonical-model fit, auto camera calibration, screen-space pitch |
 | `internal/facemodel` | the 4.9 MB MediaPipe ONNX model, `go:embed`-ed into the binary |
+| `internal/telemetry` | telemetry window: `Collector` (framer hook for raw rows of every stream, emitter sink, session callbacks) and the dashboard; simulator |
 | `internal/store` | `~/.config/tobii4c`: calibration, display geometry, camera calibration, backups |
 | `cmd/tobii4c` | CLI (one file per subcommand) |
 

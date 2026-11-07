@@ -4,6 +4,7 @@
 //	tobii4c info    [flag]   identità, catalogo stream, colonne, display area
 //	tobii4c dump    [flag]   decodifica generica di stream grezzi (reverse engineering)
 //	tobii4c recv    [flag]   ricevitore UDP di prova
+//	tobii4c telemetry [flag] finestra di telemetria: camera IR, viso e tutti i dati
 //	tobii4c udev             stampa la regola udev da installare
 //	tobii4c keymap           stampa la mappa colonne di default (JSON)
 package main
@@ -63,6 +64,8 @@ func main() {
 		err = cmdFace(args)
 	case "headpose-calibrate":
 		err = cmdHeadPoseCalibrate(args)
+	case "telemetry":
+		err = cmdTelemetry(args)
 	case "lsl-recv":
 		err = cmdLSLRecv(args)
 	case "udev":
@@ -101,6 +104,8 @@ uso: tobii4c <comando> [flag]
   headpose-calibrate
                app a schermo intero per il pitch della testa: calibrazione della
                camera con fasi guidate a tempo, zero del viso, verifica
+  telemetry    finestra con l'anteprima della camera IR e tutti i punti del viso,
+               e tutto ciò che il driver riceve dal sensore
   udev         stampa la regola udev (vedi README per l'installazione)
   keymap       stampa la mappa colonne di default in JSON
 

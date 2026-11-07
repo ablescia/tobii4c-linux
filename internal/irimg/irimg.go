@@ -12,6 +12,7 @@ package irimg
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -152,4 +153,39 @@ func ReadPGM(r io.Reader) (*Frame, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// ReadPGMFile legge un PGM binario dal file path.
+func ReadPGMFile(path string) (*Frame, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	return ReadPGM(fh)
+}
+
+// AppendPayload codifica f come payload dello stream 0x501, nello stesso
+// formato del 4C (riga XDS con timestamp, bit per pixel, larghezza, altezza e
+// pixel). Serve al simulatore e ai test.
+func AppendPayload(dst []byte, f *Frame) []byte {
+	col := func(dst []byte, key uint32) []byte {
+		dst = ttp.AppendTag(dst, 0x00020bb9)
+		return ttp.AppendU32(dst, key)
+	}
+	dst = ttp.PayloadPrefix(dst)
+	dst = ttp.AppendTag(dst, 5<<16|0x0bb8)
+	dst = col(dst, KeyTimestamp)
+	dst = append(dst, ttp.TypeS64, 0, 0, 0, 8)
+	dst = binary.BigEndian.AppendUint64(dst, uint64(f.DeviceUs))
+	for _, kv := range [][2]uint32{{KeyBPP, 8}, {KeyWidth, uint32(f.W)}, {KeyHeight, uint32(f.H)}} {
+		dst = col(dst, kv[0])
+		dst = ttp.AppendU32(dst, kv[1])
+	}
+	dst = col(dst, KeyImage)
+	n := f.W * f.H
+	dst = append(dst, ttp.TypeBytes)
+	dst = binary.BigEndian.AppendUint32(dst, uint32(4+n))
+	dst = binary.BigEndian.AppendUint32(dst, uint32(n))
+	return append(dst, f.Pix[:n]...)
 }

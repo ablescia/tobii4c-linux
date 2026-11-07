@@ -93,6 +93,15 @@ Misure del 2026-11-03 su un 4C con firmware `IS4 4.7.0-d374125`
     (0x19/0x1a) vale −1 anche con l'utente tracciato (cattura ET5), quindi
     per sapere dove sono gli occhi nell'immagine il driver usa il modello del
     viso.
+12. **Il firmware espone anche, in sola lettura** (verificato sul 4C il
+    2026-11-07): il track box (op 0x578, 8 vertici: 300 × 200 mm a 450 mm,
+    550 × 400 mm a 900 mm), proprietà (op 0x532) e stato (op 0x5d2) come
+    coppie chiave → testo, e lo stream `log` (0x1772), che si sottoscrive senza
+    autenticazione e invia righe di testo del firmware con il timestamp del
+    tracker (es. `[ 73592.529468] (I) TDI thread: Changed run mode to 22`).
+    `algodbg` (0x1770) arriva a 90 Hz con un blob vuoto. Le colonne 0x19/0x1a
+    valgono −1 anche sul 4C con l'utente tracciato. La finestra
+    [`telemetry`](#telemetria) mostra tutto.
 
 ## Architettura
 
@@ -148,6 +157,7 @@ Misure del 2026-11-03 su un 4C con firmware `IS4 4.7.0-d374125`
 | `internal/irimg` | decodifica dello stream immagine 0x501, PGM |
 | `internal/nn` | interprete ONNX minimale in Go puro (Conv, depthwise, PRelu, Add, MaxPool, Pad, Reshape, Transpose, Sigmoid), kernel AVX2/FMA in assembly |
 | `internal/headpose` | landmark del viso, fit del modello canonico, calibrazione automatica della camera, pitch nel sistema dello schermo |
+| `internal/telemetry` | finestra di telemetria: raccolta dei dati dalla pipeline (hook, sink, callback di sessione) e cruscotto |
 | `internal/store` | `~/.config/tobii4c`: calibrazione, geometria dello schermo, calibrazione della camera, backup |
 | `cmd/tobii4c` | CLI |
 
@@ -352,7 +362,85 @@ verificarlo con `echo $PATH` (o usare il percorso completo). Il servizio
 `tobii4c.service` è un'unit utente standard: `systemctl --user` funziona
 identico su entrambe. Il servizio tiene occupato il tracker: prima di `info`, `calibrate` o
 `headpose-calibrate` va fermato con `systemctl --user stop tobii4c`.
-Altrimenti questi comandi rispondono `device or resource busy`.
+Altrimenti questi comandi rispondono `device or resource busy`. La
+[telemetria](#telemetria) se ne accorge da sola e chiede di fermarlo.
+
+## Telemetria
+
+```sh
+./bin/tobii4c telemetry              # finestra di telemetria col 4C
+./bin/tobii4c telemetry -fullscreen  # a schermo intero (il tasto F alterna)
+./bin/tobii4c telemetry -simulate -simulate-image "$(ls /tmp/ir/*.pgm | head -1)"  # senza 4C
+```
+
+Una sola finestra con, a sinistra, l'anteprima della camera IR (a specchio,
+con guadagno automatico) e sotto la posa della testa e lo stato del modello
+del viso. A destra, ordinato in schede, c'è tutto ciò che il driver riceve dal
+4C:
+
+| Scheda | Contenuto |
+|---|---|
+| Camera IR | i 478 punti del modello del viso (468 della mesh, 10 delle iridi, colorati per occhio); i contorni o la triangolazione di MediaPipe; il ritaglio del modello; i centri corneali del tracker proiettati con la camera calibrata; le posizioni sul sensore 0x19/0x1a, se il firmware le riempie |
+| Testa | pitch, yaw e roll con la loro sorgente (immagine o occhi); posizione nel sistema dello schermo e del tracker; distanza tra le cornee; pitch prima di filtro e zero |
+| Modello del viso | probabilità del viso, tempo d'inferenza, immagini ricevute, elaborate e scartate, ricerche, ritardo dell'immagine sul gaze; calibrazione della camera (focale, posizione, inclinazione, qualità); zero del pitch; scarto immagine − occhi |
+| Sguardo sullo schermo | punto filtrato con la scia, punto reattivo, sguardo di ciascun occhio, nelle proporzioni della display area |
+| Occhi nel track box | vista dall'alto e di lato con il volume restituito dal firmware, la display area e i centri corneali |
+| Pupilla e palpebre | ultimi 10 s, per occhio |
+| Presenza | stato, valore grezzo e cambi dello stream 0x504 |
+| Stream gaze | le 39 colonne così come le invia il firmware, a coppie sinistro/destro e con la loro validità; quelle che il driver non esporta sono segnate |
+| Stream del dispositivo | catalogo con stato della sottoscrizione, frequenza e dimensione dei messaggi; colonne di ogni stream; ultima riga degli stream senza scheda propria; notifiche |
+| Dispositivo | identità, USB, protocollo e realm, frequenza dichiarata, occhi abilitati, display area, montaggio, track box, proprietà (op 0x532) e stato (op 0x5d2) |
+| Comunicazione e pipeline | frequenza; frame persi dal 4C e scartati dall'host; errori e resync; trasferimenti e banda USB; latenza della pipeline; RTT del keep-alive; frame counter e orologio del 4C |
+| Registro | le righe del log del firmware (stream 0x1772) e i messaggi del driver |
+
+Tasti: `M` alterna il disegno del viso (punti, punti e contorni, punti e
+triangolazione, solo immagine); `N` mostra le colonne con i nomi del firmware
+invece delle descrizioni; `P` o spazio mette in pausa; `R` azzera i
+contatori; `S` salva una schermata PNG; `F` o `F11` alterna lo schermo
+intero; `Esc` o `Q` chiude.
+
+Il driver gira dentro la finestra, che quindi ha bisogno del tracker libero.
+All'avvio la telemetria cerca chi lo tiene occupato: `tobii4c.service` attivo,
+o un altro servizio utente con il nodo USB aperto (per esempio uno che avvia
+`tobii4c run`). Se lo trova, prima di collegarsi chiede nella finestra se
+fermarlo (Invio) o uscire (Esc), e alla chiusura lo riavvia. Con
+`-stop-service` lo ferma senza chiedere; con `-restart-service=false` non lo
+riavvia. Un programma che non è un servizio va chiuso a mano: il registro ne
+riporta il PID, e la telemetria si collega appena il tracker è libero. Con
+`-udp 127.0.0.1:5005` i campioni continuano ad arrivare anche ai programmi
+che leggono l'UDP.
+
+Lo stream immagine resta attivo anche con l'utente assente, perché
+l'anteprima è lo scopo della finestra (`-headpose-images-always=false` per
+il comportamento di `run`). La finestra chiede di aprirsi massimizzata.
+Omarchy ignora apposta queste richieste (`suppress_event = "maximize"`):
+lì si usa `F` o `-fullscreen`. Su 1920 × 1080 tutto entra a scala 1; in una
+finestra più piccola il cruscotto scala in proporzione.
+
+| Flag | Default | Significato |
+|---|---|---|
+| `-fullscreen`, `-maximized` | off, on | stato iniziale della finestra |
+| `-monitor`, `-size` | primario, monitor | monitor e dimensione iniziale (`LARGHEZZAxALTEZZA`) |
+| `-udp` | — | inoltra anche i campioni via UDP |
+| `-stop-service`, `-restart-service` | off, on | ferma senza chiedere il servizio che usa il tracker; riavvialo alla chiusura |
+| `-firmware-log` | on | sottoscrive lo stream log (0x1772) |
+| `-extra-streams` | — | altri stream da mostrare, es. `0x1770` |
+| `-keepalive` | 2s | ping di salute, di cui mostra il tempo di risposta |
+| `-screenshots`, `-autoshot` | `.`, 0 | cartella delle schermate; salvataggio periodico |
+| `-duration` | 0 | chiude dopo questo tempo |
+| `-simulate`, `-simulate-image` | off, — | dati simulati senza 4C; immagine passata al modello del viso |
+| `-headpose-…` | come `run` | modello, camera, inferenze al secondo |
+
+Verifica sul 4C (2026-11-07), a schermo intero su 1920 × 1080:
+- gaze a 90,0 Hz e immagini a 30,0 Hz, nessun frame perso;
+- banda USB 9,4 MB/s, RTT del keep-alive 0,32–0,34 ms;
+- viso trovato nel 100% delle immagini, inferenza di circa 12,5 ms;
+- i centri corneali del tracker, proiettati con la camera calibrata, cadono sui
+  centri delle iridi trovati dal modello;
+- il processo usa circa il 57% di un core: quasi tutto è il modello del viso,
+  il disegno di un frame costa 0,8 ms;
+- con un servizio utente che teneva il 4C, la telemetria lo ha trovato dal
+  nodo USB, l'ha fermato e si è collegata.
 
 ## Come calibrare correttamente
 
@@ -718,6 +806,15 @@ resumed`.
   da qui `-headpose-rotation image`.
   Un test di regressione copre il bug trovato dal vivo: dopo una ricerca lenta
   il viso deve essere seguito, non ricercato.
+- `internal/telemetry`: le 39 colonne del 4C ordinate in 16 righe (coppie
+  sinistro/destro e validità, nessuna esclusa); il cruscotto disegnato senza
+  X a più dimensioni, da 300 × 200 a 3840 × 2160; la domanda sul servizio
+  (azione fuori dal loop, errore, nuovo tentativo, `Esc`); il simulatore che
+  scrive mentre l'interfaccia legge (`-race`). Con `TOBII4C_TELEMETRY_PNG` e
+  `TOBII4C_FACE_IMAGE` salva le schermate con un viso vero. `internal/ttp`
+  ricodifica il frame gaze dell'ET5 byte per byte uguale e decodifica track
+  box, proprietà e log catturati dal 4C. `internal/x11ui` verifica che la
+  cache dei glifi disegni pixel per pixel come il rasterizzatore.
 - Installazione da zero (2026-11-04) su una VM Debian 13.7 appena installata,
   senza desktop (VirtualBox 7.1, 4C in passthrough USB). Tutti i blocchi
   `sh` di questo README, eseguiti così come sono scritti e nell'ordine in cui
@@ -780,14 +877,15 @@ resumed`.
 - Restano non esportate alcune colonne dello stream gaze: punto di sguardo 3D
   per occhio (0x04/0x0a), centro del bulbo oculare (0x17/0x18), posizione 2D
   rispetto al sensore (0x19/0x1a), guida al posizionamento (0x25–0x28) e 0x11,
-  senza nome. `tobii4c dump` le mostra.
+  senza nome. `tobii4c dump` e la finestra `telemetry` le mostrano.
 - Testato su un solo esemplare 4C (firmware 4.7.0). Un firmware diverso con
   colonne diverse viene segnalato all'avvio e si gestisce con `-keymap`.
 
 ## Licenza
 
 MIT, vedi [`LICENSE`](LICENSE). I componenti di terze parti inclusi nel
-repository sono i dati del modello canonico del viso di MediaPipe (Apache 2.0)
+repository sono i dati del modello canonico del viso e le connessioni della
+mesh di MediaPipe (Apache 2.0)
 e le catture dell'Eye Tracker 5 di Krazubu/tobii-linux (MIT). Sono elencati,
 insieme alle dipendenze, in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 

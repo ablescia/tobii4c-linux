@@ -5,6 +5,7 @@
 | Componente | File | Licenza | Testo |
 |---|---|---|---|
 | Modello canonico del viso di [MediaPipe](https://github.com/google-ai-edge/mediapipe) (33 vertici e pesi della base di Procrustes), Copyright 2020 The MediaPipe Authors | `internal/headpose/canonical.go` | Apache 2.0 | [`LICENSES/Apache-2.0-MediaPipe.txt`](LICENSES/Apache-2.0-MediaPipe.txt) |
+| Connessioni della mesh del viso di [MediaPipe](https://github.com/google-ai-edge/mediapipe) (`face_mesh_connections.py`: triangolazione e contorni), Copyright 2021 The MediaPipe Authors | `internal/headpose/mesh.go` | Apache 2.0 | [`LICENSES/Apache-2.0-MediaPipe.txt`](LICENSES/Apache-2.0-MediaPipe.txt) |
 | Rete `face_landmarks_detector` di MediaPipe Face Landmarker, © Google LLC, convertita in ONNX (file non modificato da [senty-au/face_landmarks_detector-ONNX](https://huggingface.co/senty-au/face_landmarks_detector-ONNX)) | `internal/facemodel/face_landmarks_detector.onnx`, incorporato nel binario | Apache 2.0 | [`LICENSES/Apache-2.0-MediaPipe.txt`](LICENSES/Apache-2.0-MediaPipe.txt) |
 | Catture USB dell'Eye Tracker 5 da [Krazubu/tobii-linux](https://github.com/Krazubu/tobii-linux), Copyright (c) 2026 Andrii Klaptsov | `internal/ttp/testdata/et5-*.hex` | MIT | [`internal/ttp/testdata/LICENSE`](internal/ttp/testdata/LICENSE) |
 
