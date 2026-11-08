@@ -308,6 +308,7 @@ ricompila sempre senza LSL.
 ./bin/tobii4c run -lsl -udp ""     # solo LSL (build con -tags lsl)
 ./bin/tobii4c recv                 # ricevitore UDP di prova (altro terminale)
 python3 examples/recv.py           # ricevitore Python, solo libreria standard
+go run ./examples/webcam-face      # modello del viso sulla webcam, senza 4C (vedi sotto)
 ./bin/tobii4c dump -streams 0x504 -frames 2 -duration 5s   # decodifica generica per reverse engineering
 ./bin/tobii4c dump -images /tmp/ir -frames 0 -duration 3s  # salva frame IR come PGM (due al secondo)
 ./bin/tobii4c face "$(ls /tmp/ir/*.pgm | head -1)" -out /tmp/viso.png  # modello del viso su un'immagine, PNG annotato
@@ -441,6 +442,70 @@ Verifica sul 4C (2026-11-07), a schermo intero su 1920 × 1080:
   il disegno di un frame costa 0,8 ms;
 - con un servizio utente che teneva il 4C, la telemetria lo ha trovato dal
   nodo USB, l'ha fermato e si è collegata.
+
+## Viso dalla webcam (esempio)
+
+```sh
+go run ./examples/webcam-face                    # webcam Sunplus SPCA2281 (USB 1bcf:2281), a schermo intero
+go run ./examples/webcam-face -device /dev/video2 -fov 70
+go run ./examples/webcam-face -size 1280x720 -format mjpeg
+go run ./examples/webcam-face -png /tmp/viso.png # senza finestra: schermata dopo 4 s
+make webcam-face                                 # → bin/webcam-face
+```
+
+L'anteprima del viso della [telemetria](#telemetria), ma su una webcam
+qualsiasi invece che sul sensore IR del 4C: stesso modello (MediaPipe Face
+Landmarker incorporato in `internal/facemodel`), stesso interprete ONNX in
+Go puro, stessa logica di inseguimento e ricerca dello stimatore. La webcam si
+legge via V4L2 con ioctl e mmap, senza librerie C. Il 4C non serve e il
+driver può restare in esecuzione.
+
+A sinistra l'immagine in **bianco e nero**: in YUYV è il canale Y (la
+luminanza) così come arriva dalla webcam, in MJPEG il piano Y del JPEG. Sopra
+ci sono i 478 punti, i contorni o la triangolazione, le iridi e il ritaglio
+del modello; sotto, gli ultimi 10 s di rotazione della testa, apertura degli
+occhi e tempo del modello. A destra la telemetria:
+
+| Scheda | Contenuto |
+|---|---|
+| Testa | pitch, yaw e roll rispetto all'asse della webcam (convenzioni di `Euler`); centro della testa e distanza dal fit del modello canonico; distanza dal diametro dell'iride (11,7 mm); inclinazione della linea degli occhi |
+| Occhi | per occhio: centro e diametro dell'iride, EAR, distanza tra le palpebre in mm, posizione dell'iride nell'occhio; occhi aperti o chiusi, ammiccamenti, distanza tra le iridi |
+| Bocca e viso | apertura e larghezza della bocca, MAR, riquadro e centro del viso, scala mm/pixel, luminanza e nitidezza del viso |
+| Modello del viso | probabilità, modalità (inseguimento o ricerca a griglia), tempo per frame con media, p95 e massimo, frame elaborati e scartati, ricerche, ritaglio, ritardo cattura → risultato, costo e SHA-256 del modello |
+| Webcam | nome, USB (id, produttore, velocità, porta, seriale), driver, formato, spazio colore, frequenza nominale e misurata, sequenza, frame persi, ritardo dall'inizio del frame, banda, conversione, buffer, formati disponibili |
+| Immagine | istogramma della luminanza con percentili, media, minimo e massimo, pixel neri e saturati |
+| Controlli · V4L2 | tutti i controlli della webcam (luminosità, esposizione, bilanciamento…), riletti ogni secondo |
+| Processo | CPU, memoria, heap e GC di Go, goroutine e thread, tempi di disegno della finestra |
+
+Senza un viso il modello fa una ricerca a griglia (fino a una trentina di
+inferenze), sempre più di rado finché non trova nulla. Mentre la ricerca è in
+corso l'anteprima mostra l'ultimo frame della webcam, senza punti. Pose e
+distanze dipendono dalla focale, ricavata da `-fov` (campo visivo
+orizzontale, default 60°): non c'è una calibrazione, quindi le distanze
+assolute valgono quanto quel valore.
+
+Tasti: `M` alterna il disegno del viso; `V` l'anteprima a specchio; `P` o
+spazio mette in pausa; `R` azzera i contatori; `S` salva una schermata PNG;
+`F` o `F11` alterna lo schermo intero; `Esc` o `Q` chiude.
+
+| Flag | Default | Significato |
+|---|---|---|
+| `-device`, `-usb-id` | auto, `1bcf:2281` | nodo V4L2; con `auto` la webcam USB con quell'id, altrimenti la prima |
+| `-size`, `-format`, `-fps` | 640x480, yuyv, 30 | modalità richiesta alla webcam (`yuyv`, `mjpeg`, `grey`) |
+| `-fov` | 60 | campo visivo orizzontale in gradi, per la focale |
+| `-mirror` | on | anteprima a specchio |
+| `-window`, `-monitor` | off, primario | finestra normale invece dello schermo intero; monitor |
+| `-model`, `-workers` | incorporato, 1 | modello ONNX e goroutine dell'inferenza |
+| `-shots` | `.` | cartella delle schermate |
+| `-png`, `-png-size`, `-duration` | —, 1920x1080, 0 | interfaccia salvata in PNG senza X; chiusura dopo un tempo |
+
+Verifica con la Sunplus SPCA2281 (2026-11-08), 640 × 480 YUYV:
+- viso trovato e seguito frame per frame, 12–13 ms d'inferenza, circa 25% di
+  un core per tutto il processo;
+- estrazione della luminanza in circa 176 µs per frame, nessun frame perso;
+- in una stanza poco illuminata la webcam scende da sola a circa 17 fps
+  (esposizione automatica): `v4l2-ctl --stream-mmap` misura lo stesso valore;
+- ricerca a griglia senza viso in 290–360 ms.
 
 ## Come calibrare correttamente
 
@@ -815,6 +880,13 @@ resumed`.
   ricodifica il frame gaze dell'ET5 byte per byte uguale e decodifica track
   box, proprietà e log catturati dal 4C. `internal/x11ui` verifica che la
   cache dei glifi disegni pixel per pixel come il rasterizzatore.
+- `examples/webcam-face`: numeri degli ioctl V4L2 uguali a quelli del kernel
+  a 64 bit; estrazione della luminanza da YUYV con padding di riga e frame
+  troncati; ammiccamenti contati, e nessuno se lo sguardo resta basso; il
+  modello vero su un frame e l'interfaccia disegnata senza X e senza webcam a
+  più dimensioni, compreso il passaggio all'anteprima diretta durante una
+  ricerca. Con `TOBII4C_FACE_IMAGE` usa un viso vero, con `WEBCAM_FACE_PNG`
+  salva le schermate.
 - Installazione da zero (2026-11-04) su una VM Debian 13.7 appena installata,
   senza desktop (VirtualBox 7.1, 4C in passthrough USB). Tutti i blocchi
   `sh` di questo README, eseguiti così come sono scritti e nell'ordine in cui

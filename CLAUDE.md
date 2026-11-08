@@ -15,6 +15,7 @@ The README, commit messages, and all code comments are written in **Italian**. M
 ```sh
 make build       # go build -trimpath -o bin/tobii4c ./cmd/tobii4c
 make build-lsl   # same, with -tags lsl (needs liblsl: lsl_c.h + liblsl.so)
+make webcam-face # examples/webcam-face → bin/webcam-face (face model on a V4L2 webcam, no 4C)
 make test        # go vet ./... && go test ./...  (no device required)
 make bench       # go test -bench . -benchmem ./internal/...
 make race        # go build -race -o bin/tobii4c-race
@@ -77,6 +78,7 @@ Buffers return to their pool only *after* emission, which bounds in-flight frame
 | `internal/telemetry` | telemetry window: `Collector` (framer hook for raw rows of every stream, emitter sink, session callbacks) and the dashboard; simulator |
 | `internal/store` | `~/.config/tobii4c`: calibration, display geometry, camera calibration, backups |
 | `cmd/tobii4c` | CLI (one file per subcommand) |
+| `examples/webcam-face` | standalone example: pure-Go V4L2 capture (ioctl + mmap) → `headpose.Detector` → full-screen x11ui window with B/W preview and telemetry; `-png` renders without X |
 
 ## Output formats
 

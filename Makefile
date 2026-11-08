@@ -3,7 +3,7 @@ BIN      ?= bin/tobii4c
 PREFIX   ?= $(HOME)/.local
 GOFLAGS  ?= -trimpath
 
-.PHONY: all build build-lsl test bench race install install-lsl install-udev uninstall-udev clean
+.PHONY: all build build-lsl webcam-face test bench race install install-lsl install-udev uninstall-udev clean
 
 all: build
 
@@ -13,6 +13,10 @@ build:
 # Richiede liblsl (header lsl_c.h e liblsl.so): https://github.com/sccn/liblsl/releases
 build-lsl:
 	go build $(GOFLAGS) -tags lsl -o $(BIN) ./cmd/tobii4c
+
+# Esempio: il modello del viso del driver sulle immagini di una webcam.
+webcam-face:
+	go build $(GOFLAGS) -o bin/webcam-face ./examples/webcam-face
 
 test:
 	go vet ./...
