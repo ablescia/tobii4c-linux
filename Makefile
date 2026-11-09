@@ -3,7 +3,7 @@ BIN      ?= bin/tobii4c
 PREFIX   ?= $(HOME)/.local
 GOFLAGS  ?= -trimpath
 
-.PHONY: all build build-lsl webcam-face test bench race install install-lsl install-udev uninstall-udev clean
+.PHONY: all build build-lsl webcam-face webcam-body shaders test bench race install install-lsl install-udev uninstall-udev clean
 
 all: build
 
@@ -17,6 +17,14 @@ build-lsl:
 # Esempio: il modello del viso del driver sulle immagini di una webcam.
 webcam-face:
 	go build $(GOFLAGS) -o bin/webcam-face ./examples/webcam-face
+
+# Esempio: lo scheletro (corpo intero o mezzo busto) con MediaPipe Pose sulla GPU.
+webcam-body:
+	go build $(GOFLAGS) -o bin/webcam-body ./examples/webcam-body
+
+# Ricompila gli shader Vulkan di internal/tflite (serve glslc, pacchetto shaderc).
+shaders:
+	go generate ./internal/tflite
 
 test:
 	go vet ./...

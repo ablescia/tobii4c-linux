@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ablescia/tobii4c-linux/internal/headpose"
+	"github.com/ablescia/tobii4c-linux/internal/webcam"
 	"github.com/ablescia/tobii4c-linux/internal/x11ui"
 )
 
@@ -49,7 +50,7 @@ func axisTable(i0, i1, wt []int32, n, src int, mirror bool) ([]int32, []int32, [
 
 func (a *App) previewNote() string {
 	in := &a.Eng.Info
-	s := itoa(in.W) + "×" + itoa(in.H) + " " + fourccString(in.PixFmt)
+	s := itoa(in.W) + "×" + itoa(in.H) + " " + webcam.FourCCString(in.PixFmt)
 	if a.rates.have {
 		s += " · anteprima " + num(a.rates.PreviewHz, 1) + " Hz"
 	}

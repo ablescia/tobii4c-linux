@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ablescia/tobii4c-linux/internal/headpose"
+	"github.com/ablescia/tobii4c-linux/internal/webcam"
 	"github.com/ablescia/tobii4c-linux/internal/x11ui"
 )
 
@@ -216,7 +217,6 @@ func (a *App) camNote() string { return a.Eng.Info.Path }
 
 var colorspaces = map[uint32]string{1: "SMPTE 170M", 2: "SMPTE 240M", 3: "Rec. 709", 5: "470 M", 6: "470 BG",
 	7: "JPEG", 8: "sRGB", 9: "opRGB", 10: "BT.2020", 11: "raw", 12: "DCI-P3"}
-var quantizations = map[uint32]string{0: "quantizzazione predefinita", 1: "gamma completa", 2: "gamma ridotta"}
 
 func (a *App) drawCamera(img *image.RGBA, b image.Rectangle) {
 	in := &a.Eng.Info
@@ -235,12 +235,16 @@ func (a *App) drawCamera(img *image.RGBA, b image.Rectangle) {
 		k.row("Seriale", u.Serial, colText, true)
 	}
 	k.row("Driver", in.Driver+" "+in.Version+" · "+in.Bus, colText, false)
-	k.row("Formato", fourccString(in.PixFmt)+" · "+itoa(in.W)+"×"+itoa(in.H)+" · "+itoa(in.BytesPerLine)+" B/riga", colText, true)
 	cs := colorspaces[in.Colorspace]
 	if cs == "" {
 		cs = "spazio " + itoa(int(in.Colorspace))
 	}
-	k.row("Colore", cs+" · "+quantizations[in.Quantization], colText, false)
+	f := webcam.FourCCString(in.PixFmt) + " · " + itoa(in.W) + "×" + itoa(in.H)
+	if in.BytesPerLine > 0 {
+		f += " · " + itoa(in.BytesPerLine) + " B/riga"
+	}
+	k.row("Formato · colore", f+" · "+cs, colText, true)
+	k.row("Modalità", in.Choice, colText, false)
 	k.row("Frequenza", "nominale "+num(in.FPS, 1)+" fps · misurata "+num(r.FPS, 2)+" fps", colText, true)
 	seq := "—"
 	if a.snap.Have {
@@ -256,11 +260,7 @@ func (a *App) drawCamera(img *image.RGBA, b image.Rectangle) {
 		" · illeggibili "+itoa(int(c.DecodeErrs-a.base.DecodeErrs)), lc, true)
 	k.row("Inizio frame → app", num(r.LatencyMs, 1)+" ms (timestamp del driver)", colText, true)
 	k.row("Banda", num(r.MBps, 2)+" MB/s · "+num(r.FrameKiB, 0)+" KiB/frame", colText, true)
-	conv := "solo la Y"
-	if in.PixFmt == pixMJPG {
-		conv = "JPEG → Y"
-	}
-	k.row("Conversione", num(r.DecodeUs, 0)+" µs/frame · "+conv, colText, true)
+	k.row("Conversione", num(r.DecodeUs, 0)+" µs · "+a.Eng.ConvNote(), colText, true)
 	k.row("Buffer · formati", itoa(in.Buffers)+" × "+sizeText(float64(in.BufferBytes))+" · "+strings.Join(in.Formats, ", "), colText, false)
 }
 
@@ -290,7 +290,21 @@ func (a *App) ctrlNote() string {
 			n++
 		}
 	}
+	if len(a.Eng.Info.Changed) > 0 {
+		return itoa(n) + " controlli · grigi gli inattivi, verdi i cambiati"
+	}
 	return itoa(n) + " controlli · letti ogni secondo · in grigio gli inattivi"
+}
+
+// changedCtrl dice se il controllo è stato cambiato all'apertura (frequenza
+// fissa, -ctrl).
+func (a *App) changedCtrl(id uint32) bool {
+	for _, ch := range a.Eng.Info.Changed {
+		if ch.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Nomi italiani dei controlli standard (gli altri restano come li dà il driver).
@@ -321,12 +335,12 @@ func ctrlValue(c *Control) string {
 	}
 	var s string
 	switch c.Type {
-	case ctrlTypeBoolean:
+	case webcam.CtrlTypeBoolean:
 		s = "no"
 		if c.Value != 0 {
 			s = "sì"
 		}
-	case ctrlTypeMenu, ctrlTypeIntegerMenu:
+	case webcam.CtrlTypeMenu, webcam.CtrlTypeIntegerMenu:
 		s = c.Menu[c.Value]
 		if t, ok := menuNames[s]; ok {
 			s = t
@@ -334,7 +348,7 @@ func ctrlValue(c *Control) string {
 		if s == "" {
 			s = itoa(int(c.Value))
 		}
-	case ctrlTypeInteger:
+	case webcam.CtrlTypeInteger:
 		s = itoa(int(c.Value))
 		if c.ID == 0x009a0902 { // unità di 100 µs
 			s = num(float64(c.Value)/10, 1) + " ms"
@@ -342,7 +356,7 @@ func ctrlValue(c *Control) string {
 	default:
 		s = itoa(int(c.Value))
 	}
-	if c.Value != c.Default && c.Type != ctrlTypeMenu {
+	if c.Value != c.Default && c.Type != webcam.CtrlTypeMenu {
 		s += " (pred. " + itoa(int(c.Default)) + ")"
 	}
 	return s
@@ -376,8 +390,11 @@ func (a *App) drawControls(img *image.RGBA, b image.Rectangle) {
 			continue
 		}
 		lc, vc := colDim, colText
-		if c.Flags&ctrlFlagInactive != 0 {
+		if c.Flags&webcam.CtrlFlagInactive != 0 {
 			lc, vc = colFaint, colFaint
+		}
+		if a.changedCtrl(c.ID) {
+			vc = colOK
 		}
 		x11ui.Text(img, a.f.small, x, y, fit(a.f.small, ctrlName(c), labelW-a.px(4)), lc, x11ui.Left)
 		x11ui.Text(img, a.f.monoS, x+labelW, y, fit(a.f.monoS, ctrlValue(c), colW-labelW), vc, x11ui.Left)

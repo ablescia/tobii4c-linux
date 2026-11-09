@@ -10,6 +10,7 @@ import (
 
 	"github.com/ablescia/tobii4c-linux/internal/headpose"
 	"github.com/ablescia/tobii4c-linux/internal/irimg"
+	"github.com/ablescia/tobii4c-linux/internal/webcam"
 )
 
 // Pipeline: cattura → elaborazione → interfaccia.
@@ -88,9 +89,12 @@ type Counters struct {
 	DecodeNs, LatencyNs, PipelineNs                            int64
 }
 
+// Control è un controllo V4L2 (alias per l'interfaccia).
+type Control = webcam.Control
+
 // Engine possiede la webcam, il modello e lo stato condiviso.
 type Engine struct {
-	Info    CamInfo
+	Info    webcam.CamInfo
 	Focal   float64 // pixel
 	FOV     float64 // gradi
 	Workers int
@@ -98,8 +102,9 @@ type Engine struct {
 	Model   string
 	ModelOK bool // SHA-256 del modello provato dal driver
 
-	cam *Webcam
-	det *headpose.Detector
+	cam  *webcam.Webcam
+	det  *headpose.Detector
+	conv *webcam.Converter
 
 	free chan *frame
 	work chan *frame
@@ -133,9 +138,10 @@ type Engine struct {
 	blink      blinker
 }
 
-// NewEngine prepara la pipeline su una webcam aperta.
-func NewEngine(cam *Webcam, det *headpose.Detector, focal, fov float64, workers int, model string) *Engine {
-	e := &Engine{Info: cam.Info, cam: cam, det: det, Focal: focal, FOV: fov, Workers: workers,
+// NewEngine prepara la pipeline su una webcam aperta; decoders sono le
+// goroutine della decodifica MJPEG.
+func NewEngine(cam *webcam.Webcam, det *headpose.Detector, focal, fov float64, workers, decoders int, model string) *Engine {
+	e := &Engine{Info: cam.Info, cam: cam, det: det, conv: webcam.NewConverter(&cam.Info, decoders), Focal: focal, FOV: fov, Workers: workers,
 		MACs: det.MACs(), Model: model, ModelOK: det.Verified,
 		free: make(chan *frame, poolFrames), work: make(chan *frame, 1)}
 	for i := 0; i < poolFrames; i++ {
@@ -156,7 +162,11 @@ func (e *Engine) Run(ctx context.Context) {
 	go func() { defer wg.Done(); e.process(ctx) }()
 	go func() { defer wg.Done(); e.pollControls(ctx) }()
 	wg.Wait()
+	e.conv.Close()
 }
+
+// ConvNote descrive la conversione in luminanza.
+func (e *Engine) ConvNote() string { return e.conv.Note() }
 
 func (e *Engine) setErr(s string) {
 	e.mu.Lock()
@@ -168,7 +178,6 @@ func (e *Engine) setErr(s string) {
 }
 
 func (e *Engine) capture(ctx context.Context) {
-	info := &e.Info
 	var lastSeq uint32
 	haveSeq := false
 	var seq uint64
@@ -181,18 +190,18 @@ func (e *Engine) capture(ctx context.Context) {
 		}
 		var convErr error
 		bad := false
-		err := e.cam.Next(time.Second, func(data []byte, bi BufInfo) {
+		err := e.cam.Next(time.Second, func(data []byte, bi webcam.BufInfo) {
 			t0 := time.Now()
 			if haveSeq && bi.Sequence > lastSeq+1 {
 				e.seqGaps.Add(uint64(bi.Sequence - lastSeq - 1))
 			}
 			lastSeq, haveSeq = bi.Sequence, true
-			if bi.Flags&bufFlagError != 0 {
+			if bi.Flags&webcam.BufFlagError != 0 {
 				e.bufErrors.Add(1)
 				bad = true
 				return
 			}
-			convErr = toGray(info.PixFmt, data, info.W, info.H, info.BytesPerLine, f.Pix)
+			convErr = e.conv.Gray(data, f.Pix)
 			e.decodeNs.Add(time.Since(t0).Nanoseconds())
 			f.camSeq, f.bytes, f.captured = bi.Sequence, len(data), t0
 			f.latency = 0
@@ -201,7 +210,7 @@ func (e *Engine) capture(ctx context.Context) {
 			}
 		})
 		switch {
-		case err == errTimeout:
+		case err == webcam.ErrTimeout:
 			e.setErr("nessun frame dalla webcam da più di un secondo")
 			e.free <- f
 			continue

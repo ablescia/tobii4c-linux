@@ -10,8 +10,14 @@
 // della webcam) con i 478 punti, a destra la telemetria di webcam, modello,
 // viso e processo.
 //
+// Di default usa la modalità più veloce della webcam e poi la più grande
+// (con la Logitech C925e: MJPEG 1280×720 a 60 fps) e tiene fissa la
+// frequenza anche con poca luce.
+//
 //	go run ./examples/webcam-face
-//	go run ./examples/webcam-face -size 1280x720 -format mjpeg
+//	go run ./examples/webcam-face -list              # modalità della webcam
+//	go run ./examples/webcam-face -fps 30            # 1920×1080 sulla C925e
+//	go run ./examples/webcam-face -size 640x480 -format yuyv
 //	go run ./examples/webcam-face -png /tmp/viso.png   # senza finestra
 package main
 
@@ -23,12 +29,14 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ablescia/tobii4c-linux/internal/headpose"
+	"github.com/ablescia/tobii4c-linux/internal/webcam"
 	"github.com/ablescia/tobii4c-linux/internal/x11ui"
 )
 
@@ -40,15 +48,19 @@ func main() {
 }
 
 func run() error {
-	device := flag.String("device", "auto", "nodo V4L2 della webcam; auto: quella USB con -usb-id, altrimenti la prima")
-	usbID := flag.String("usb-id", "1bcf:2281", "vid:pid cercato da -device auto (Sunplus SPCA2281)")
-	size := flag.String("size", "640x480", "risoluzione richiesta alla webcam (il driver può sceglierne una vicina)")
-	format := flag.String("format", "yuyv", "formato: yuyv (luminanza senza decodifica), mjpeg (risoluzioni alte a 30 fps), grey")
-	fps := flag.Int("fps", 30, "frame al secondo richiesti")
+	device := flag.String("device", "auto", "nodo V4L2 della webcam; auto: la prima USB con un id di -usb-id, altrimenti la prima")
+	usbID := flag.String("usb-id", "046d:085b,1bcf:2281", "vid:pid cercati da -device auto, in ordine (Logitech C925e, Sunplus SPCA2281)")
+	size := flag.String("size", "auto", "risoluzione: auto (la più grande alla frequenza scelta) o LARGHEZZAxALTEZZA")
+	format := flag.String("format", "auto", "formato: auto, yuyv (luminanza senza decodifica), mjpeg, grey")
+	fps := flag.Float64("fps", 0, "frame al secondo; 0: i più possibili")
+	fixedFPS := flag.Bool("fixed-fps", true, "frequenza fissa anche con poca luce (spegne exposure_dynamic_framerate, ripristinato all'uscita)")
+	ctrlFlag := flag.String("ctrl", "", "controlli V4L2 nome=valore separati da virgole, coi nomi di v4l2-ctl (es. power_line_frequency=50_hz); ripristinati all'uscita")
+	list := flag.Bool("list", false, "elenca le modalità della webcam e quella scelta, poi esce")
 	buffers := flag.Int("buffers", 4, "buffer mmap del driver")
+	decoders := flag.Int("decoders", 0, "goroutine della decodifica MJPEG; 0: automatico (un quarto dei core, al più 8)")
 	fov := flag.Float64("fov", 60, "campo visivo orizzontale della webcam, gradi: dà la focale per posa e distanze")
 	model := flag.String("model", "", "modello ONNX dei landmark (default: quello incorporato nel driver)")
-	workers := flag.Int("workers", 1, "goroutine dell'inferenza")
+	workers := flag.Int("workers", 0, "goroutine dell'inferenza; 0: automatico (fino a 4)")
 	mirror := flag.Bool("mirror", true, "anteprima a specchio (tasto V)")
 	monName := flag.String("monitor", "", "monitor della finestra (default: il primario)")
 	windowed := flag.Bool("window", false, "finestra normale invece dello schermo intero (tasto F)")
@@ -58,37 +70,60 @@ func run() error {
 	duration := flag.Duration("duration", 0, "esce dopo questo tempo (con -png: default 4s)")
 	flag.Parse()
 
-	w, h, err := parseSize(*size)
-	if err != nil {
-		return fmt.Errorf("-size: %w", err)
+	var req webcam.ModeRequest
+	if !strings.EqualFold(*size, "auto") {
+		w, h, err := parseSize(*size)
+		if err != nil {
+			return fmt.Errorf("-size: %w", err)
+		}
+		req.W, req.H = w, h
 	}
-	var pix uint32
 	switch strings.ToLower(*format) {
+	case "auto":
 	case "yuyv":
-		pix = pixYUYV
+		req.PixFmt = webcam.PixYUYV
 	case "mjpeg", "mjpg":
-		pix = pixMJPG
+		req.PixFmt = webcam.PixMJPG
 	case "grey", "gray":
-		pix = pixGREY
+		req.PixFmt = webcam.PixGREY
 	default:
-		return fmt.Errorf("-format: %q non valido (yuyv, mjpeg, grey)", *format)
+		return fmt.Errorf("-format: %q non valido (auto, yuyv, mjpeg, grey)", *format)
+	}
+	if *fps < 0 || math.IsNaN(*fps) {
+		return fmt.Errorf("-fps: %v non valido", *fps)
+	}
+	req.FPS = *fps
+	ctrls, err := webcam.ParseCtrlSettings(*ctrlFlag)
+	if err != nil {
+		return fmt.Errorf("-ctrl: %w", err)
 	}
 	if !(*fov > 1 && *fov < 179) {
 		return fmt.Errorf("-fov: %v non valido", *fov)
 	}
+	nw := *workers
+	if nw <= 0 {
+		nw = min(runtime.NumCPU(), 4)
+	}
+	nd := *decoders
+	if nd <= 0 {
+		nd = min(max(runtime.NumCPU()/4, 1), 8)
+	}
 
 	path := *device
 	if path == "auto" {
-		if path, err = findWebcam(*usbID); err != nil {
+		if path, err = webcam.FindWebcam(*usbID); err != nil {
 			return err
 		}
 	}
-	cam, err := OpenWebcam(path, w, h, pix, *fps, *buffers)
+	if *list {
+		return webcam.ListModes(path, req)
+	}
+	cam, err := webcam.Open(path, webcam.OpenOptions{Mode: req, Buffers: *buffers, FixedFPS: *fixedFPS, Controls: ctrls})
 	if err != nil {
 		return err
 	}
 	defer cam.Close()
-	det, err := headpose.NewDetector(*model, *workers)
+	det, err := headpose.NewDetector(*model, nw)
 	if err != nil {
 		return err
 	}
@@ -98,9 +133,12 @@ func run() error {
 	}
 	// focale pinhole dal campo visivo orizzontale
 	focal := float64(cam.Info.W) / 2 / math.Tan(*fov/2*math.Pi/180)
-	eng := NewEngine(cam, det, focal, *fov, max(1, *workers), name)
-	fmt.Fprintf(os.Stderr, "webcam-face: %s (%s) %d×%d %s, %.1f fps nominali\n", path, cam.Info.Card,
-		cam.Info.W, cam.Info.H, fourccString(cam.Info.PixFmt), cam.Info.FPS)
+	eng := NewEngine(cam, det, focal, *fov, nw, nd, name)
+	fmt.Fprintf(os.Stderr, "webcam-face: %s (%s) %d×%d %s, %.1f fps nominali · %s\n", path, cam.Info.Card,
+		cam.Info.W, cam.Info.H, webcam.FourCCString(cam.Info.PixFmt), cam.Info.FPS, cam.Info.Choice)
+	for _, ch := range cam.Info.Changed {
+		fmt.Fprintf(os.Stderr, "webcam-face: %s %d → %d (ripristinato all'uscita)\n", ch.Name, ch.Old, ch.New)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

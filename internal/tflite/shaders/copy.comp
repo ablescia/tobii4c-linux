@@ -1,0 +1,16 @@
+#version 450
+// Copia a blocchi per CONCATENATION: in[o][r] → out[o·outA + off + r].
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P {
+	uint outer, inA, outA, off, x, y;
+} p;
+
+void main() {
+	uint idx = linearID(256u);
+	if (idx >= p.outer * p.inA) return;
+	uint o = idx / p.inA, r = idx % p.inA;
+	A[p.y + o * p.outA + p.off + r] = A[p.x + idx];
+}

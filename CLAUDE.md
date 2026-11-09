@@ -16,6 +16,8 @@ The README, commit messages, and all code comments are written in **Italian**. M
 make build       # go build -trimpath -o bin/tobii4c ./cmd/tobii4c
 make build-lsl   # same, with -tags lsl (needs liblsl: lsl_c.h + liblsl.so)
 make webcam-face # examples/webcam-face → bin/webcam-face (face model on a V4L2 webcam, no 4C)
+make webcam-body # examples/webcam-body → bin/webcam-body (MediaPipe Pose skeleton on the GPU, no 4C)
+make shaders     # go generate ./internal/tflite: GLSL → SPIR-V with glslc (only after editing shaders/*.comp)
 make test        # go vet ./... && go test ./...  (no device required)
 make bench       # go test -bench . -benchmem ./internal/...
 make race        # go build -race -o bin/tobii4c-race
@@ -28,6 +30,7 @@ Single test / package:
 go test ./internal/ttp/ -run TestName -v
 go test -race ./internal/calib/      # calib flow test uses the simulator, runs under -race
 go test -run '^$' -bench . -benchmem ./internal/nn/
+go test -run '^$' -bench Models ./internal/tflite   # pose networks, CPU vs GPU
 ```
 
 Go ≥ 1.22. The LSL sink (`internal/sink/lsl*.go`) and its `lsl-recv` command are behind the `lsl` build tag and use cgo; without the tag `lsl_stub.go` is compiled. The nn package has AVX2/FMA assembly (`simd_amd64.s`) with a pure-Go fallback (`simd_other.go`).
@@ -72,13 +75,24 @@ Buffers return to their pool only *after* emission, which bounds in-flight frame
 | `internal/calib` | gaze calibration: fixation, collect, compute, backup/restore, accuracy metrics, simulator |
 | `internal/calibui`, `internal/x11ui` | full-screen calibration UI; pure-Go X11 windows (`jezek/xgb`): full-screen override-redirect (`Open`) or managed/resizable (`OpenWindow`), RandR/EDID, antialiased drawing, glyph cache |
 | `internal/irimg` | 0x501 image-stream decode, PGM |
-| `internal/nn` | minimal pure-Go ONNX interpreter (subset of ops) with AVX2/FMA asm kernels |
+| `internal/nn` | minimal pure-Go ONNX interpreter (subset of ops) with AVX2/FMA asm kernels; `export.go` exposes the axpy kernels to `internal/tflite` |
+| `internal/tflite` | pure-Go TFLite reader (flatbuffers, float16 and sparse/DENSIFY weights) → `Graph`: NHWC plan with PAD→conv and conv→ADD fusion, full-cover convs as GEMM, HWIO weights, lifetime-based arena. Same plan runs on `GPU` (Vulkan, GLSL in `shaders/`, SPIR-V committed in `spv/` and `go:embed`-ed; one pre-recorded command buffer per model; YCbCr→RGB rotated crop done by `warp.comp`) or `CPU` (fallback/reference) |
+| `internal/vk` | minimal Vulkan compute binding loaded at runtime via purego (no cgo): device, buffers, pipelines with one shared layout (2 storage buffers + 128 B push constants), programs, timestamps |
+| `internal/bodypose` | MediaPipe Pose: model specs (downloaded to `~/.cache/tobii4c/models`, SHA-256 pinned), SSD detector + weighted NMS, rotated ROI, landmarks + heatmap refine, One Euro filters, tracking; `Measure` (joint angles, posture, lean, distance). Full body = Pose Landmarker lite/full/heavy (33 pts + 3D); upper body = MediaPipe 0.8.3 upper-body model (25 pts) |
+| `internal/webcam` | shared by both webcam examples: pure-Go V4L2 capture (ioctl + mmap; picks the fastest mode via ENUM_FRAMESIZES/INTERVALS, pins the frame rate, restores changed controls on exit) and the zero-alloc MJPEG decoder split across goroutines at restart markers (`mjpeg.go`, luma only via `Converter.Gray`, plus Cb/Cr via `Converter.Convert`; falls back to `image/jpeg`) |
 | `internal/headpose` | face landmarks, canonical-model fit, auto camera calibration, screen-space pitch |
 | `internal/facemodel` | the 4.9 MB MediaPipe ONNX model, `go:embed`-ed into the binary |
 | `internal/telemetry` | telemetry window: `Collector` (framer hook for raw rows of every stream, emitter sink, session callbacks) and the dashboard; simulator |
 | `internal/store` | `~/.config/tobii4c`: calibration, display geometry, camera calibration, backups |
 | `cmd/tobii4c` | CLI (one file per subcommand) |
-| `examples/webcam-face` | standalone example: pure-Go V4L2 capture (ioctl + mmap) → `headpose.Detector` → full-screen x11ui window with B/W preview and telemetry; `-png` renders without X |
+| `examples/webcam-face` | standalone example: `internal/webcam` (luma only) → `headpose.Detector` → full-screen x11ui window with B/W preview and telemetry; `-png` renders without X |
+| `examples/webcam-body` | one program for full body and half body (radio buttons / `-mode`), variant and GPU/CPU switchable live; color preview, skeleton, mask, posture/joints/3D/model/GPU cards; `-png` renders without X |
+
+### GPU path gotchas
+
+- `internal/vk` calls C through `purego.SyscallN` wrapped by `call` (`//go:uintptrescapes`). Pointer arguments **must** be written as `uintptr(unsafe.Pointer(&x))` directly in the call's argument list: converting in a helper hides the pointer from the compiler, `x` can stay on the stack, the stack can move before the call and the driver writes to stale memory (seen as `vkEnumeratePhysicalDevices` returning 0 GPUs only at some stack depths).
+- Struct layouts in `vk.go` mirror the C ones by hand (amd64/arm64); offsets into `VkPhysicalDeviceLimits` are hard-coded (checked against `vulkaninfo`).
+- Tests that need the pose models read them from the cache and skip when absent; reference outputs (LiteRT, MediaPipe 0.10.14) live in `internal/tflite/testdata` and `internal/bodypose/testdata`.
 
 ## Output formats
 

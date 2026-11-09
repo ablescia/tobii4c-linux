@@ -1,0 +1,40 @@
+#version 450
+// Convoluzione 1×1 per matrici con poche righe (mappe piccole, teste
+// finali): un workgroup per pixel e 64 canali d'uscita, con la somma su K
+// divisa tra 4 wave e ridotta in memoria condivisa. Pesi [K][N].
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 64, local_size_y = 4) in;
+layout(push_constant) uniform P {
+	uint M, K, N, x, w, b, y, res, act1, act2;
+} p;
+
+shared float part[4][64];
+
+void main() {
+	uint tx = gl_LocalInvocationID.x, kz = gl_LocalInvocationID.y;
+	uint n = gl_WorkGroupID.x * 64u + tx;
+	uint m = gl_WorkGroupID.y + gl_WorkGroupID.z * 65535u;
+	float s = 0.0;
+	if (n < p.N && m < p.M) {
+		uint xr = p.x + m * p.K;
+		uint k = kz;
+		for (; k + 12u < p.K; k += 16u) {
+			s += A[xr + k] * A[p.w + k * p.N + n];
+			s += A[xr + k + 4u] * A[p.w + (k + 4u) * p.N + n];
+			s += A[xr + k + 8u] * A[p.w + (k + 8u) * p.N + n];
+			s += A[xr + k + 12u] * A[p.w + (k + 12u) * p.N + n];
+		}
+		for (; k < p.K; k += 4u) s += A[xr + k] * A[p.w + k * p.N + n];
+	}
+	part[kz][tx] = s;
+	barrier();
+	if (kz != 0u || n >= p.N || m >= p.M) return;
+	float v = part[0][tx] + part[1][tx] + part[2][tx] + part[3][tx];
+	if (p.b != NONE) v += A[p.b + n];
+	v = act(v, p.act1);
+	uint o = m * p.N + n;
+	if (p.res != NONE) v = act(v + A[p.res + o], p.act2);
+	A[p.y + o] = v;
+}

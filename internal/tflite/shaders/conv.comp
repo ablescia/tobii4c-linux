@@ -1,0 +1,33 @@
+#version 450
+// Convoluzione generica (pesi HWIO: [KH][KW][Cin][Cout], letti in modo
+// coalescente dai thread di uno stesso pixel): un thread per uscita.
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P {
+	uint IH, IW, C, OH, OW, N, KH, KW, SH, SW, PT, PL, DH, DW;
+	uint x, w, b, y, res, act1, act2;
+} p;
+
+void main() {
+	uint idx = linearID(64u);
+	if (idx >= p.OH * p.OW * p.N) return;
+	uint n = idx % p.N, pix = idx / p.N;
+	uint ox = pix % p.OW, oy = pix / p.OW;
+	float s = (p.b != NONE) ? A[p.b + n] : 0.0;
+	for (uint kh = 0u; kh < p.KH; kh++) {
+		int iy = int(oy * p.SH + kh * p.DH) - int(p.PT);
+		if (iy < 0 || iy >= int(p.IH)) continue;
+		for (uint kw = 0u; kw < p.KW; kw++) {
+			int ix = int(ox * p.SW + kw * p.DW) - int(p.PL);
+			if (ix < 0 || ix >= int(p.IW)) continue;
+			uint bi = p.x + (uint(iy) * p.IW + uint(ix)) * p.C;
+			uint bw = p.w + (kh * p.KW + kw) * p.C * p.N + n;
+			for (uint c = 0u; c < p.C; c++) s += A[bi + c] * A[bw + c * p.N];
+		}
+	}
+	s = act(s, p.act1);
+	if (p.res != NONE) s = act(s + A[p.res + idx], p.act2);
+	A[p.y + idx] = s;
+}

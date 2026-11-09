@@ -1,11 +1,12 @@
 //go:build linux
 
-package main
+package webcam
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,23 +30,30 @@ const (
 	capStreaming    = 0x04000000
 	capDeviceCaps   = 0x80000000
 
-	bufFlagError              = 0x00000040
+	BufFlagError              = 0x00000040
 	bufFlagTimestampMask      = 0x0000e000
 	bufFlagTimestampMonotonic = 0x00002000
 
 	ctrlFlagNextCtrl  = 0x80000000
-	ctrlFlagDisabled  = 0x0001
-	ctrlFlagInactive  = 0x0010
+	CtrlFlagDisabled  = 0x0001
+	CtrlFlagInactive  = 0x0010
 	ctrlFlagWriteOnly = 0x0040
 
-	ctrlTypeInteger     = 1
-	ctrlTypeBoolean     = 2
-	ctrlTypeMenu        = 3
-	ctrlTypeButton      = 4
-	ctrlTypeInteger64   = 5
-	ctrlTypeCtrlClass   = 6
-	ctrlTypeString      = 7
-	ctrlTypeIntegerMenu = 9
+	CtrlTypeInteger     = 1
+	CtrlTypeBoolean     = 2
+	CtrlTypeMenu        = 3
+	CtrlTypeButton      = 4
+	CtrlTypeInteger64   = 5
+	CtrlTypeCtrlClass   = 6
+	CtrlTypeString      = 7
+	CtrlTypeIntegerMenu = 9
+
+	frmTypeDiscrete = 1 // V4L2_FRMSIZE_TYPE_DISCRETE, V4L2_FRMIVAL_TYPE_DISCRETE
+
+	// V4L2_CID_EXPOSURE_AUTO_PRIORITY (exposure_dynamic_framerate): con
+	// l'esposizione automatica la webcam può allungare la posa e scendere
+	// sotto la frequenza chiesta (la C925e da 60 a 30 fps in una stanza).
+	cidExposureAutoPriority = 0x009a0903
 )
 
 func fourcc(s string) uint32 {
@@ -53,12 +61,12 @@ func fourcc(s string) uint32 {
 }
 
 var (
-	pixYUYV = fourcc("YUYV")
-	pixMJPG = fourcc("MJPG")
-	pixGREY = fourcc("GREY")
+	PixYUYV = fourcc("YUYV")
+	PixMJPG = fourcc("MJPG")
+	PixGREY = fourcc("GREY")
 )
 
-func fourccString(v uint32) string {
+func FourCCString(v uint32) string {
 	b := []byte{byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24)}
 	return strings.TrimRight(string(b), " \x00")
 }
@@ -150,6 +158,22 @@ type v4l2Control struct {
 	Value int32
 }
 
+// v4l2FrmSizeEnum: U è l'unione discreta (larghezza, altezza) o a passi
+// (min, max e passo della larghezza, poi dell'altezza).
+type v4l2FrmSizeEnum struct {
+	Index, PixelFormat, Type uint32
+	U                        [6]uint32
+	Reserved                 [2]uint32
+}
+
+// v4l2FrmIvalEnum: U è l'unione discreta (una frazione) o a passi (minimo,
+// massimo e passo).
+type v4l2FrmIvalEnum struct {
+	Index, PixelFormat, Width, Height, Type uint32
+	U                                       [6]uint32
+	Reserved                                [2]uint32
+}
+
 // v4l2QueryMenu è impaccata nel kernel: 44 byte, il nome è in unione con il
 // valore s64 dei menu interi.
 type v4l2QueryMenu struct {
@@ -179,8 +203,12 @@ var (
 	vidiocGParm     = ioc(iocRead|iocWrite, 21, unsafe.Sizeof(v4l2StreamParm{}))
 	vidiocSParm     = ioc(iocRead|iocWrite, 22, unsafe.Sizeof(v4l2StreamParm{}))
 	vidiocGCtrl     = ioc(iocRead|iocWrite, 27, unsafe.Sizeof(v4l2Control{}))
+	vidiocSCtrl     = ioc(iocRead|iocWrite, 28, unsafe.Sizeof(v4l2Control{}))
 	vidiocQueryCtrl = ioc(iocRead|iocWrite, 36, unsafe.Sizeof(v4l2QueryCtrl{}))
 	vidiocQueryMenu = ioc(iocRead|iocWrite, 37, unsafe.Sizeof(v4l2QueryMenu{}))
+
+	vidiocEnumFrameSizes     = ioc(iocRead|iocWrite, 74, unsafe.Sizeof(v4l2FrmSizeEnum{}))
+	vidiocEnumFrameIntervals = ioc(iocRead|iocWrite, 75, unsafe.Sizeof(v4l2FrmIvalEnum{}))
 )
 
 func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
@@ -243,6 +271,9 @@ type CamInfo struct {
 	Buffers      int
 	BufferBytes  int
 	USB          USBInfo
+	Modes        []Mode       // modalità elencate dalla webcam
+	Choice       string       // come è stata scelta la modalità
+	Changed      []CtrlChange // controlli cambiati all'apertura (ripristinati da Close)
 }
 
 // Webcam è un dispositivo V4L2 in streaming con buffer mmap.
@@ -254,10 +285,21 @@ type Webcam struct {
 	on   bool
 }
 
-// OpenWebcam apre path, imposta formato e frequenza e avvia lo streaming.
-// Il driver può scegliere una risoluzione vicina a quella chiesta: quella
-// effettiva è in Info.
-func OpenWebcam(path string, w, h int, pix uint32, fps, nbuf int) (*Webcam, error) {
+// OpenOptions dice come aprire la webcam.
+type OpenOptions struct {
+	Mode    ModeRequest
+	Buffers int
+	// FixedFPS spegne exposure_dynamic_framerate: la frequenza resta
+	// quella chiesta anche con poca luce (la posa si accorcia, sale il
+	// guadagno).
+	FixedFPS bool
+	Controls []CtrlSetting // impostati dopo il formato, nell'ordine
+}
+
+// Open apre path, sceglie la modalità (pickMode tra quelle elencate
+// dalla webcam), imposta formato, frequenza e controlli e avvia lo
+// streaming. La modalità effettiva è in Info.
+func Open(path string, opt OpenOptions) (*Webcam, error) {
 	fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -286,6 +328,29 @@ func OpenWebcam(path string, w, h int, pix uint32, fps, nbuf int) (*Webcam, erro
 	}
 	in.Formats = enumFormats(fd)
 	in.USB = usbInfo(path)
+	in.Modes = enumModes(fd)
+
+	req := opt.Mode
+	w, h, pix := req.W, req.H, req.PixFmt
+	var ival v4l2Fract
+	if m, iv, ok := pickMode(in.Modes, req); ok {
+		w, h, pix, ival = m.W, m.H, m.PixFmt, iv
+		in.Choice = choiceText(req, len(in.Modes))
+	} else {
+		// modalità non elencate (o nessuna convertibile): si chiede quella
+		// data e il driver sceglie la più vicina
+		if w <= 0 || h <= 0 {
+			w, h = 640, 480
+		}
+		if pix == 0 {
+			pix = PixYUYV
+		}
+		ival = v4l2Fract{1, 30}
+		if req.FPS > 0 {
+			ival = v4l2Fract{1000, uint32(math.Round(req.FPS * 1000))}
+		}
+		in.Choice = "chiesta al driver (modalità non elencate)"
+	}
 
 	var f v4l2Format
 	f.Type = bufTypeVideoCapture
@@ -298,24 +363,28 @@ func OpenWebcam(path string, w, h int, pix uint32, fps, nbuf int) (*Webcam, erro
 		return nil, fmt.Errorf("%s: VIDIOC_S_FMT: %w", path, err)
 	}
 	if p.PixelFormat != pix {
-		return nil, fmt.Errorf("%s: formato %s non supportato (disponibili: %s)", path, fourccString(pix), strings.Join(in.Formats, ", "))
+		return nil, fmt.Errorf("%s: formato %s non supportato (disponibili: %s)", path, FourCCString(pix), strings.Join(in.Formats, ", "))
 	}
 	in.W, in.H, in.PixFmt = int(p.Width), int(p.Height), p.PixelFormat
 	in.BytesPerLine, in.SizeImage = int(p.BytesPerLine), int(p.SizeImage)
 	in.Colorspace, in.Quantization, in.XferFunc, in.YcbcrEnc = p.Colorspace, p.Quantization, p.XferFunc, p.YcbcrEnc
 
 	// frequenza: S_PARM può fallire (non tutte le webcam la regolano)
-	if fps > 0 {
+	if ival.Numerator > 0 && ival.Denominator > 0 {
 		sp := v4l2StreamParm{Type: bufTypeVideoCapture}
-		sp.Capture.TimePerFrame = v4l2Fract{1, uint32(fps)}
+		sp.Capture.TimePerFrame = ival
 		_ = ioctl(fd, vidiocSParm, unsafe.Pointer(&sp))
 	}
 	sp := v4l2StreamParm{Type: bufTypeVideoCapture}
 	if ioctl(fd, vidiocGParm, unsafe.Pointer(&sp)) == nil && sp.Capture.TimePerFrame.Numerator > 0 {
-		in.FPS = float64(sp.Capture.TimePerFrame.Denominator) / float64(sp.Capture.TimePerFrame.Numerator)
+		in.FPS = fractFPS(sp.Capture.TimePerFrame)
 	}
 
-	rb := v4l2RequestBuffers{Count: uint32(nbuf), Type: bufTypeVideoCapture, Memory: memoryMMAP}
+	if err := c.applyControls(opt); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+
+	rb := v4l2RequestBuffers{Count: uint32(max(opt.Buffers, 2)), Type: bufTypeVideoCapture, Memory: memoryMMAP}
 	if err := ioctl(fd, vidiocReqBufs, unsafe.Pointer(&rb)); err != nil {
 		return nil, fmt.Errorf("%s: VIDIOC_REQBUFS: %w", path, err)
 	}
@@ -354,7 +423,7 @@ func enumFormats(fd int) []string {
 		if ioctl(fd, vidiocEnumFmt, unsafe.Pointer(&d)) != nil {
 			break
 		}
-		out = append(out, fourccString(d.PixelFormat))
+		out = append(out, FourCCString(d.PixelFormat))
 	}
 	return out
 }
@@ -372,7 +441,7 @@ func (b BufInfo) Monotonic() bool {
 	return b.Flags&bufFlagTimestampMask == bufFlagTimestampMonotonic
 }
 
-var errTimeout = errors.New("nessun frame dalla webcam")
+var ErrTimeout = errors.New("nessun frame dalla webcam")
 
 // Next attende il frame successivo (al più timeout), chiama fn con i dati
 // del buffer e lo restituisce al driver. data vale solo durante fn.
@@ -384,7 +453,7 @@ func (c *Webcam) Next(timeout time.Duration, fn func(data []byte, bi BufInfo)) e
 		if err == syscall.EAGAIN {
 			rem := time.Until(deadline)
 			if rem <= 0 {
-				return errTimeout
+				return ErrTimeout
 			}
 			if err := waitReadable(c.fd, min(rem, 100*time.Millisecond)); err != nil {
 				return err
@@ -419,8 +488,19 @@ func waitReadable(fd int, d time.Duration) error {
 	return err
 }
 
-// Close ferma lo streaming e rilascia buffer e descrittore.
+// Close rimette i controlli cambiati da Open com'erano, ferma lo
+// streaming e rilascia buffer e descrittore.
 func (c *Webcam) Close() {
+	if c.fd >= 0 {
+		for i := len(c.Info.Changed) - 1; i >= 0; i-- {
+			ch := c.Info.Changed[i]
+			if err := c.restoreCtrl(ch); err != nil {
+				fmt.Fprintf(os.Stderr, "webcam-face: %s non ripristinato a %d (v4l2-ctl -c %s=%d): %v\n",
+					ch.Name, ch.Old, ch.Name, ch.Old, err)
+			}
+		}
+		c.Info.Changed = nil
+	}
 	if c.on {
 		typ := int32(bufTypeVideoCapture)
 		_ = ioctl(c.fd, vidiocStreamOff, unsafe.Pointer(&typ))
@@ -434,6 +514,29 @@ func (c *Webcam) Close() {
 		syscall.Close(c.fd)
 		c.fd = -1
 	}
+}
+
+// restoreCtrl rimette un controllo al valore originale e lo rilegge; un
+// trasferimento di controllo USB può fallire per un attimo, quindi riprova.
+func (c *Webcam) restoreCtrl(ch CtrlChange) error {
+	var err error
+	for try := 0; try < 5; try++ {
+		if try > 0 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		v := v4l2Control{ID: ch.ID, Value: ch.Old}
+		if err = ioctl(c.fd, vidiocSCtrl, unsafe.Pointer(&v)); err != nil {
+			continue
+		}
+		g := v4l2Control{ID: ch.ID}
+		if err = ioctl(c.fd, vidiocGCtrl, unsafe.Pointer(&g)); err == nil {
+			if g.Value == ch.Old {
+				return nil
+			}
+			err = fmt.Errorf("riletto %d", g.Value)
+		}
+	}
+	return err
 }
 
 // Control è un controllo V4L2 (luminosità, esposizione, …).
@@ -459,19 +562,19 @@ func (c *Webcam) Controls() []Control {
 			break
 		}
 		id = q.ID | ctrlFlagNextCtrl
-		if q.Flags&ctrlFlagDisabled != 0 {
+		if q.Flags&CtrlFlagDisabled != 0 {
 			continue
 		}
 		ct := Control{ID: q.ID, Name: cstr(q.Name[:]), Type: q.Type, Min: q.Minimum, Max: q.Maximum,
-			Step: q.Step, Default: q.DefaultValue, Flags: q.Flags, Class: q.Type == ctrlTypeCtrlClass}
-		if q.Type == ctrlTypeMenu || q.Type == ctrlTypeIntegerMenu {
+			Step: q.Step, Default: q.DefaultValue, Flags: q.Flags, Class: q.Type == CtrlTypeCtrlClass}
+		if q.Type == CtrlTypeMenu || q.Type == CtrlTypeIntegerMenu {
 			ct.Menu = map[int32]string{}
 			for i := q.Minimum; i <= q.Maximum && i-q.Minimum < 64; i++ {
 				m := v4l2QueryMenu{ID: q.ID, Index: uint32(i)}
 				if ioctl(c.fd, vidiocQueryMenu, unsafe.Pointer(&m)) != nil {
 					continue
 				}
-				if q.Type == ctrlTypeMenu {
+				if q.Type == CtrlTypeMenu {
 					ct.Menu[i] = cstr(m.Name[:])
 				} else {
 					ct.Menu[i] = strconv.FormatInt(int64(binary.NativeEndian.Uint64(m.Name[:8])), 10)
@@ -489,8 +592,8 @@ func (c *Webcam) ReadControls(cs []Control) {
 	for i := range cs {
 		ct := &cs[i]
 		switch {
-		case ct.Class, ct.Flags&ctrlFlagWriteOnly != 0, ct.Type == ctrlTypeButton,
-			ct.Type == ctrlTypeString, ct.Type == ctrlTypeInteger64:
+		case ct.Class, ct.Flags&ctrlFlagWriteOnly != 0, ct.Type == CtrlTypeButton,
+			ct.Type == CtrlTypeString, ct.Type == CtrlTypeInteger64:
 			continue
 		}
 		v := v4l2Control{ID: ct.ID}
@@ -578,24 +681,33 @@ func isCaptureNode(dev string) bool {
 	return caps&capVideoCapture != 0 && caps&capStreaming != 0
 }
 
-// findWebcam cerca il nodo di cattura della webcam USB con l'id vid:pid; se
+// FindWebcam cerca il nodo di cattura della prima webcam USB con uno degli
+// id vid:pid della lista (separati da virgole, in ordine di preferenza); se
 // non c'è, ripiega sulla prima webcam trovata.
-func findWebcam(id string) (string, error) {
-	nodes := videoNodes()
+func FindWebcam(ids string) (string, error) {
 	var first string
-	for _, n := range nodes {
+	found := map[string]string{} // vid:pid → nodo
+	for _, n := range videoNodes() {
 		if !isCaptureNode(n) {
 			continue
 		}
 		if first == "" {
 			first = n
 		}
-		if d := usbDir(n); d != "" && strings.EqualFold(readAttr(d, "idVendor")+":"+readAttr(d, "idProduct"), id) {
+		if d := usbDir(n); d != "" {
+			id := strings.ToLower(readAttr(d, "idVendor") + ":" + readAttr(d, "idProduct"))
+			if found[id] == "" {
+				found[id] = n
+			}
+		}
+	}
+	for _, id := range strings.Split(ids, ",") {
+		if n := found[strings.ToLower(strings.TrimSpace(id))]; n != "" {
 			return n, nil
 		}
 	}
 	if first != "" {
-		fmt.Fprintf(os.Stderr, "webcam-face: nessuna webcam USB %s, uso %s\n", id, first)
+		fmt.Fprintf(os.Stderr, "webcam-face: nessuna webcam USB %s, uso %s\n", ids, first)
 		return first, nil
 	}
 	return "", errors.New("nessuna webcam V4L2 trovata (/dev/video*)")

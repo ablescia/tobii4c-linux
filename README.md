@@ -158,6 +158,10 @@ Misure del 2026-11-03 su un 4C con firmware `IS4 4.7.0-d374125`
 | `internal/nn` | interprete ONNX minimale in Go puro (Conv, depthwise, PRelu, Add, MaxPool, Pad, Reshape, Transpose, Sigmoid), kernel AVX2/FMA in assembly |
 | `internal/headpose` | landmark del viso, fit del modello canonico, calibrazione automatica della camera, pitch nel sistema dello schermo |
 | `internal/telemetry` | finestra di telemetria: raccolta dei dati dalla pipeline (hook, sink, callback di sessione) e cruscotto |
+| `internal/tflite` | interprete TFLite in Go puro (flatbuffer, pesi float16 e sparsi): piano NHWC con fusioni, esecuzione sulla GPU (shader SPIR-V) o sulla CPU |
+| `internal/vk` | binding Vulkan minimo per il calcolo, caricato a runtime con purego (senza cgo) |
+| `internal/bodypose` | MediaPipe Pose: modelli (scaricati e verificati), detector, ritaglio, landmark, filtri, postura e angoli |
+| `internal/webcam` | V4L2 in Go puro (ioctl e mmap), scelta della modalità, controlli, decoder MJPEG parallelo senza allocazioni, con la crominanza a richiesta (per `examples/webcam-face` e `examples/webcam-body`) |
 | `internal/store` | `~/.config/tobii4c`: calibrazione, geometria dello schermo, calibrazione della camera, backup |
 | `cmd/tobii4c` | CLI |
 
@@ -215,6 +219,12 @@ export PATH="$PATH:$(go env GOPATH)/bin"   # ~/go/bin, che né Debian né Arch m
 Se il repository è privato, Go deve saltare il proxy pubblico e scaricarlo
 con `git` (va installato) e le tue credenziali (chiave SSH o token):
 `GOPRIVATE=github.com/ablescia/* go install …`.
+
+Per `examples/webcam-body` sulla GPU serve a runtime il loader di Vulkan con
+un driver (`libvulkan1` e `mesa-vulkan-drivers` su Debian, `vulkan-icd-loader`
+e `vulkan-radeon`/`vulkan-intel` su Arch); in compilazione no. Gli shader sono
+già compilati in `internal/tflite/spv`: `glslc` (`shaderc`) serve solo per
+rigenerarli dopo una modifica (`make shaders`).
 
 Il modello del viso per il pitch della testa (4,9 MB) è nel repository
 (`internal/facemodel`) e viene incorporato nel binario con `go:embed`: non va
@@ -446,9 +456,11 @@ Verifica sul 4C (2026-11-07), a schermo intero su 1920 × 1080:
 ## Viso dalla webcam (esempio)
 
 ```sh
-go run ./examples/webcam-face                    # webcam Sunplus SPCA2281 (USB 1bcf:2281), a schermo intero
-go run ./examples/webcam-face -device /dev/video2 -fov 70
-go run ./examples/webcam-face -size 1280x720 -format mjpeg
+go run ./examples/webcam-face                    # modalità più veloce della webcam, a schermo intero
+go run ./examples/webcam-face -list              # modalità della webcam e quella che verrebbe scelta
+go run ./examples/webcam-face -fps 30            # la risoluzione più grande a 30 fps (1920×1080 sulla C925e)
+go run ./examples/webcam-face -size 640x480 -format yuyv -fov 70
+go run ./examples/webcam-face -ctrl power_line_frequency=50_hz
 go run ./examples/webcam-face -png /tmp/viso.png # senza finestra: schermata dopo 4 s
 make webcam-face                                 # → bin/webcam-face
 ```
@@ -460,8 +472,35 @@ Go puro, stessa logica di inseguimento e ricerca dello stimatore. La webcam si
 legge via V4L2 con ioctl e mmap, senza librerie C. Il 4C non serve e il
 driver può restare in esecuzione.
 
+Con `-device auto` prende la prima webcam USB della lista `-usb-id`
+(Logitech C925e, poi Sunplus SPCA2281), altrimenti la prima che trova. Senza
+altri flag elenca le modalità della webcam (`VIDIOC_ENUM_FRAMESIZES`,
+`VIDIOC_ENUM_FRAMEINTERVALS`) e sceglie la **più veloce**, a parità di
+frequenza la più grande e poi quella che costa meno convertire (GREY, YUYV,
+MJPEG): sulla C925e è MJPEG 1280 × 720 a 60 fps. `-size`, `-format` e `-fps`
+restringono la scelta (una risoluzione o una frequenza che la webcam non ha
+diventano le più vicine); `-list` stampa le modalità e quella scelta.
+
+Con l'esposizione automatica molte webcam allungano la posa quando c'è poca
+luce e scendono sotto la frequenza chiesta: la C925e, chiesta a 60 fps in una
+stanza, scende verso 30. Per questo `-fixed-fps` (attivo di default) spegne
+`exposure_dynamic_framerate`: la frequenza resta quella chiesta, la posa si
+accorcia e sale il guadagno. `-ctrl` imposta altri controlli coi nomi di
+`v4l2-ctl` (es. `power_line_frequency=50_hz` per l'antisfarfallio con la rete
+a 50 Hz). Tutti i controlli cambiati tornano com'erano all'uscita (anche con
+`Ctrl-C`); nella scheda dei controlli sono in verde. Se il processo viene
+ucciso con `SIGKILL` restano cambiati fino a quando la webcam non viene
+scollegata: all'avvio sono stampati con il valore originale, da rimettere con
+`v4l2-ctl -c nome=valore`.
+
 A sinistra l'immagine in **bianco e nero**: in YUYV è il canale Y (la
-luminanza) così come arriva dalla webcam, in MJPEG il piano Y del JPEG. Sopra
+luminanza) così come arriva dalla webcam, in MJPEG il piano Y del JPEG. Per
+l'MJPEG c'è un decoder apposta (`internal/webcam/mjpeg.go`, lo stesso di
+`webcam-body`, che lo usa anche per il colore) al posto di `image/jpeg`: qui
+decodifica solo la luminanza (i blocchi del colore vengono letti ma non trasformati),
+divide il frame ai marker di restart (la C925e ne mette uno ogni 10 MCU, 720
+tratti per frame a 720p) tra più goroutine e non alloca memoria; i JPEG che non
+gestisce (progressivi, a più scansioni…) passano a `image/jpeg`. Sopra
 ci sono i 478 punti, i contorni o la triangolazione, le iridi e il ritaglio
 del modello; sotto, gli ultimi 10 s di rotazione della testa, apertura degli
 occhi e tempo del modello. A destra la telemetria:
@@ -472,9 +511,9 @@ occhi e tempo del modello. A destra la telemetria:
 | Occhi | per occhio: centro e diametro dell'iride, EAR, distanza tra le palpebre in mm, posizione dell'iride nell'occhio; occhi aperti o chiusi, ammiccamenti, distanza tra le iridi |
 | Bocca e viso | apertura e larghezza della bocca, MAR, riquadro e centro del viso, scala mm/pixel, luminanza e nitidezza del viso |
 | Modello del viso | probabilità, modalità (inseguimento o ricerca a griglia), tempo per frame con media, p95 e massimo, frame elaborati e scartati, ricerche, ritaglio, ritardo cattura → risultato, costo e SHA-256 del modello |
-| Webcam | nome, USB (id, produttore, velocità, porta, seriale), driver, formato, spazio colore, frequenza nominale e misurata, sequenza, frame persi, ritardo dall'inizio del frame, banda, conversione, buffer, formati disponibili |
+| Webcam | nome, USB (id, produttore, velocità, porta, seriale), driver, formato e spazio colore, come è stata scelta la modalità, frequenza nominale e misurata, sequenza, frame persi, ritardo dall'inizio del frame, banda, conversione (tempo per frame, goroutine della decodifica), buffer, formati disponibili |
 | Immagine | istogramma della luminanza con percentili, media, minimo e massimo, pixel neri e saturati |
-| Controlli · V4L2 | tutti i controlli della webcam (luminosità, esposizione, bilanciamento…), riletti ogni secondo |
+| Controlli · V4L2 | tutti i controlli della webcam (luminosità, esposizione, bilanciamento…), riletti ogni secondo; in verde quelli cambiati all'avvio |
 | Processo | CPU, memoria, heap e GC di Go, goroutine e thread, tempi di disegno della finestra |
 
 Senza un viso il modello fa una ricerca a griglia (fino a una trentina di
@@ -490,22 +529,188 @@ spazio mette in pausa; `R` azzera i contatori; `S` salva una schermata PNG;
 
 | Flag | Default | Significato |
 |---|---|---|
-| `-device`, `-usb-id` | auto, `1bcf:2281` | nodo V4L2; con `auto` la webcam USB con quell'id, altrimenti la prima |
-| `-size`, `-format`, `-fps` | 640x480, yuyv, 30 | modalità richiesta alla webcam (`yuyv`, `mjpeg`, `grey`) |
+| `-device`, `-usb-id` | auto, `046d:085b,1bcf:2281` | nodo V4L2; con `auto` la prima webcam USB con un id della lista, altrimenti la prima |
+| `-size`, `-format`, `-fps` | auto, auto, 0 | modalità: la più veloce, poi la più grande; oppure risoluzione, formato (`yuyv`, `mjpeg`, `grey`) e frequenza chiesti |
+| `-list` | off | elenca le modalità della webcam e quella scelta, poi esce |
+| `-fixed-fps` | on | frequenza fissa anche con poca luce (`exposure_dynamic_framerate` spento) |
+| `-ctrl` | — | controlli V4L2 `nome=valore,…` coi nomi di `v4l2-ctl`; ripristinati all'uscita |
+| `-decoders`, `-buffers` | 0 (un quarto dei core, al più 8), 4 | goroutine della decodifica MJPEG; buffer mmap del driver |
 | `-fov` | 60 | campo visivo orizzontale in gradi, per la focale |
 | `-mirror` | on | anteprima a specchio |
 | `-window`, `-monitor` | off, primario | finestra normale invece dello schermo intero; monitor |
-| `-model`, `-workers` | incorporato, 1 | modello ONNX e goroutine dell'inferenza |
+| `-model`, `-workers` | incorporato, 0 (fino a 4) | modello ONNX e goroutine dell'inferenza |
 | `-shots` | `.` | cartella delle schermate |
 | `-png`, `-png-size`, `-duration` | —, 1920x1080, 0 | interfaccia salvata in PNG senza X; chiusura dopo un tempo |
 
-Verifica con la Sunplus SPCA2281 (2026-11-08), 640 × 480 YUYV:
+Verifica con la Logitech C925e (2026-11-09, USB 2.0, Ryzen 9 5950X), senza
+flag, cioè MJPEG 1280 × 720 a 60 fps:
+- 59,0–60,0 fps misurati, nessun frame perso dal driver né illeggibile,
+  144–147 KiB per frame (8,7–9,0 MB/s), 6 ms dall'inizio del frame
+  all'applicazione;
+- luminanza dal JPEG in 0,79–0,83 ms per frame con 8 goroutine;
+- senza `-fixed-fps` la stessa webcam, chiesta a 60 fps, rallenta:
+  `v4l2-ctl --stream-mmap` stampa da 58,5 a 35,5 fps, in calo, in 200 frame;
+  con `exposure_dynamic_framerate` spento sale fino a 59,5;
+- con `-fps 30` (1920 × 1080): 30,00 fps, nessun frame perso, luminanza in
+  1,6 ms, viso seguito nel 100% dei frame con 6,6 ms d'inferenza in media
+  (p95 7,4 ms, massimo 8,5 ms, 4 goroutine);
+- il decoder su 240 frame veri a 720p e 60 a 1080p: rispetto a `image/jpeg`
+  l'1,2–1,4% dei pixel differisce di un livello (arrotondamento dell'IDCT),
+  nessuno di più. Per frame (`go test -run '^$' -bench MJPEG ./internal/webcam`):
+
+| | 1280 × 720 | 1920 × 1080 |
+|---|---|---|
+| `image/jpeg` (colore compreso) | 8,6 ms · 1,9 MB e 739 allocazioni | 19,5 ms · 4,2 MB e 1607 allocazioni |
+| solo Y, 1 goroutine | 3,0 ms · nessuna allocazione | 6,7 ms |
+| solo Y, 4 goroutine | 0,95 ms | 2,0 ms |
+| solo Y, 8 goroutine (default qui) | 0,57 ms | 1,2 ms |
+
+Verifica con la Sunplus SPCA2281 (2026-11-08), 640 × 480 YUYV, con i default
+di allora (`-workers 1`):
 - viso trovato e seguito frame per frame, 12–13 ms d'inferenza, circa 25% di
   un core per tutto il processo;
 - estrazione della luminanza in circa 176 µs per frame, nessun frame perso;
 - in una stanza poco illuminata la webcam scende da sola a circa 17 fps
   (esposizione automatica): `v4l2-ctl --stream-mmap` misura lo stesso valore;
 - ricerca a griglia senza viso in 290–360 ms.
+
+## Scheletro dalla webcam (esempio)
+
+```sh
+go run ./examples/webcam-body                    # corpo intero sulla GPU, a schermo intero
+go run ./examples/webcam-body -mode busto        # mezzo busto, da seduto
+go run ./examples/webcam-body -variant heavy     # corpo intero col modello più preciso
+go run ./examples/webcam-body -backend cpu       # senza GPU
+go run ./examples/webcam-body -png /tmp/corpo.png  # senza finestra: schermata dopo 5 s
+make webcam-body                                 # → bin/webcam-body
+```
+
+Lo scheletro di una persona da una webcam qualsiasi, con i modelli di Google
+MediaPipe Pose eseguiti **sulla GPU** (Vulkan) da un interprete TFLite in Go
+puro, senza librerie C né runtime di Google. Un solo programma per le due
+tipologie di rilevamento, scelte con i **radio button** in alto a sinistra
+(o con i tasti):
+
+| Tipologia | Modello | Punti |
+|---|---|---|
+| **Corpo intero**, in piedi o seduto | MediaPipe Pose Landmarker (BlazePose GHUM 3D), varianti `lite`, `full`, `heavy` | 33, con le coordinate 3D in metri e la maschera della persona |
+| **Mezzo busto**, da seduto | il modello "upper body" di MediaPipe Pose 0.8.3, addestrato sulla sola parte superiore del corpo | 25 (testa, spalle, braccia, mani, fianchi) e la maschera; niente 3D |
+
+Accanto alla tipologia, la variante del corpo intero (`lite`, `full`,
+`heavy`) e il calcolo (GPU o CPU). Il cambio vale dal frame successivo: i
+modelli non ancora usati vengono caricati (e, la prima volta, scaricati)
+mentre l'anteprima continua; se il caricamento fallisce resta la
+configurazione di prima e la scheda dei comandi mostra l'errore.
+
+I modelli sono i file ufficiali: i `.task` di Pose Landmarker da
+`storage.googleapis.com/mediapipe-models` (float16, versione 1) e i due
+`.tflite` del mezzo busto dal tag `0.8.3.2` del repository di MediaPipe.
+Vengono scaricati al primo uso in `~/.cache/tobii4c/models` (`-models` per
+un'altra cartella, `-offline` per non scaricare) e verificati con lo SHA-256
+fissato nel codice (`internal/bodypose/models.go`); non sono nel repository.
+
+La pipeline replica i grafi di MediaPipe (`internal/bodypose`): sul frame
+intero il detector SSD (ancore, NMS pesata, letterbox), dal centro dei fianchi
+e dal punto di scala (per il mezzo busto: centro delle spalle e scala del
+busto) un ritaglio quadrato ruotato, la rete dei landmark sul ritaglio,
+raffinamento dei punti sulla heatmap, proiezione nell'immagine e filtri One
+Euro con gli stessi parametri. Nei frame successivi il ritaglio viene dai
+punti ausiliari del frame precedente (inseguimento) e il detector torna in
+gioco solo quando la presenza della persona scende sotto 0,5. Una persona
+alla volta: la più probabile.
+
+Il calcolo (`internal/tflite`) legge i flatbuffer TFLite direttamente (pesi
+float16 e sparsi compresi), compila il grafo in un piano NHWC (PAD fusi nelle
+convoluzioni, somme residue fuse nella convoluzione che le precede, le teste
+fully-connected come prodotti di matrici, memoria dei tensori riusata) e lo
+esegue sulla GPU con shader di calcolo GLSL compilati in SPIR-V e incorporati
+nel binario. Vulkan si carica a runtime con
+[purego](https://github.com/ebitengine/purego) (`internal/vk`, niente cgo):
+ogni modello è un command buffer registrato una volta e rieseguito, l'immagine
+della webcam (piani Y, Cb, Cr) viene copiata una volta per frame e il ritaglio
+ruotato, la conversione in RGB e la normalizzazione avvengono sulla GPU. Lo
+stesso piano gira anche sulla CPU (kernel AVX2/FMA di `internal/nn`), come
+ripiego se Vulkan manca e come riferimento.
+
+A sinistra l'immagine **a colori** (il decoder MJPEG del viso, esteso alla
+crominanza, in `internal/webcam`) con lo scheletro colorato per lato del
+soggetto, la maschera della persona sfumata, il ritaglio della rete e il
+riquadro del detector; sotto, gli ultimi 10 s di angoli articolari,
+inclinazioni del busto e tempo dei modelli. A destra:
+
+| Scheda | Contenuto |
+|---|---|
+| Postura | in piedi, seduto, accovacciato o sdraiato (dall'angolo di cosce e busto in 3D); busto inclinato di lato, in avanti e ruotato; spalle e testa inclinate; mani alzate; distanza dalla camera; punti visibili |
+| Articolazioni | spalle, gomiti, anche e ginocchia, sinistra e destra, in 3D (corpo intero) o nel piano dell'immagine (mezzo busto) |
+| Scheletro 3D | i punti in metri visti di fronte e di lato (solo corpo intero) |
+| Modello | presenza della persona, ritaglio (dal detector o dall'inseguimento), tempi di detector e landmark con media, p95 e massimo, frame elaborati e scartati, nodi e costo delle reti, file verificati |
+| Calcolo | GPU (nome, driver, Vulkan, memoria), tempo sulla GPU dai timestamp di Vulkan, attesa sulla CPU, GFLOP/s; oppure CPU; memoria dei modelli e tempo di caricamento |
+| Webcam, Controlli · V4L2, Processo | come in webcam-face |
+
+Un punto conta come visibile solo con visibilità **e** presenza almeno 0,5,
+come nel disegno di MediaPipe: con la persona fuori dall'inquadratura la rete
+stima comunque tutti i punti, ma quelli fuori dall'immagine restano esclusi
+(nell'anteprima sono tenui). La distanza viene dalla focale ricavata da `-fov`
+(default 70°, la C925e): col corpo intero dal rapporto tra le lunghezze del
+busto in metri e in pixel, col mezzo busto ipotizzando spalle larghe 39 cm.
+
+Tasti: `B` o `Tab` alterna corpo intero e mezzo busto; `1`, `2`, `3` scelgono
+`lite`, `full`, `heavy`; `G` alterna GPU e CPU; `M` il disegno (scheletro,
+scheletro e maschera, maschera, solo immagine); `V`, `P`, `R`, `S`, `F`,
+`Esc` come in webcam-face.
+
+| Flag | Default | Significato |
+|---|---|---|
+| `-mode` | `corpo` | `corpo` (corpo intero) o `busto` (mezzo busto) |
+| `-variant` | `full` | modello del corpo intero: `lite`, `full`, `heavy` |
+| `-backend`, `-workers` | `gpu`, 0 | `gpu` (Vulkan, con ripiego sulla CPU) o `cpu`; goroutine sulla CPU (0: una per core, al più 16) |
+| `-models`, `-offline` | `~/.cache/tobii4c/models`, off | cartella dei modelli; non scaricare quelli mancanti |
+| `-fov` | 70 | campo visivo orizzontale in gradi, per la distanza |
+| `-device`, `-usb-id`, `-size`, `-format`, `-fps`, `-fixed-fps`, `-ctrl`, `-list`, `-decoders`, `-buffers`, `-mirror`, `-window`, `-monitor`, `-shots`, `-png`, `-png-size`, `-duration` | | come in webcam-face (`-format grey` toglie il colore; `-duration` con `-png`: 5 s) |
+
+Variabili d'ambiente di `internal/vk`: `TOBII4C_VK_DEVICE=n` sceglie l'n-esima
+GPU, `TOBII4C_VK_ALLOW_CPU=1` ammette le implementazioni software (llvmpipe),
+`TOBII4C_VK_VALIDATION=1` attiva i validation layer se installati.
+
+Verifica (2026-11-09, Ryzen 9 5950X, Radeon RX 6800 XT con RADV di Mesa
+26.2.5, Logitech C925e in MJPEG 1280 × 720 a 60 fps):
+- le sei reti (detector e landmark dei due modelli, le tre varianti) danno le
+  stesse uscite di LiteRT (`ai-edge-litert`, XNNPACK) sullo stesso ingresso:
+  scarto relativo massimo 8,4·10⁻⁵ sulla CPU e sulla GPU;
+- la pipeline completa (detector, ritaglio, landmark, heatmap, 3D) su due foto
+  NASA di 512 × 640 e 640 × 422 pixel, confrontata con MediaPipe 0.10.14 in
+  modalità IMAGE: scarto medio dei punti visibili 1,5–5,4 pixel (massimo
+  16 px), coordinate 3D a 5–64 mm in media. Le reti sono identiche, ma
+  MediaPipe campiona il ritaglio con `cv::warpPerspective` a 8 bit e qui si
+  campiona in float: detector e landmark reagiscono a queste differenze
+  minime (emulare l'arrotondamento di OpenCV sposta gli scarti senza ridurli);
+- GPU e CPU danno gli stessi punti a meno di 0,03 pixel;
+- dal vivo, corpo intero `full` sulla GPU: 59,0 fps dalla webcam, tutti
+  elaborati, nessuno scartato; 2,8 ms per frame tra modelli e filtri, di cui
+  1,9 ms sulla GPU (landmark a 411 GFLOP/s); 4,0 ms dalla cattura al
+  risultato; heap di Go 27 MiB col mezzo busto caricato;
+- tempo per inferenza, ingresso già pronto
+  (`go test -run '^$' -bench Models ./internal/tflite`, 100 esecuzioni; CPU
+  con 16 goroutine; per la GPU il tempo totale dall'invio alla fine
+  dell'attesa e, tra parentesi, quello dei timestamp di Vulkan):
+
+| Rete | MMAC | GPU | CPU |
+|---|---:|---:|---:|
+| detector del corpo intero (224 × 224) | 430 | 0,97 ms (0,91) | 12,6 ms |
+| landmark `lite` (256 × 256) | 198 | 0,98 ms (0,91) | 17,2 ms |
+| landmark `full` | 386 | 1,23 ms (1,16) | 20,2 ms |
+| landmark `heavy` | 1 927 | 3,41 ms (3,34) | 57,8 ms |
+| detector del mezzo busto (128 × 128) | 469 | 1,07 ms (1,01) | 22,4 ms |
+| landmark del mezzo busto (256 × 256) | 424 | 1,40 ms (1,32) | 24,6 ms |
+
+Il mezzo busto è il modello del 2020: Google lo ha tolto da MediaPipe 0.8.4
+perché il corpo intero copre anche la sola parte superiore. Qui resta perché
+è addestrato su quell'inquadratura e il ritaglio è centrato sulle spalle, non
+sui fianchi fuori dall'immagine, ma il suo detector è più debole: su un primo
+piano con la testa molto inclinata sbaglia l'orientamento del ritaglio, dove
+il corpo intero no. Entrambi vogliono le spalle nell'inquadratura: con la
+webcam alta che riprende solo la testa il mezzo busto non trova nessuno e il
+corpo intero aggancia solo il viso.
 
 ## Come calibrare correttamente
 
@@ -855,6 +1060,38 @@ resumed`.
   canali, Sigmoid, Reshape, PRelu fuse) confrontato con un'implementazione di
   riferimento banale, con e senza AVX2 e con 1 e 3 goroutine. Il modello reale
   si carica; `make bench` ne misura l'inferenza.
+- `internal/tflite`: le sei reti di MediaPipe Pose (dalla cache dei modelli)
+  confrontate con le uscite di LiteRT salvate in `testdata` (stesso ingresso
+  generato in Go e in numpy), sulla CPU e sulla GPU; un modello sintetico con
+  tutti gli operatori e le fusioni (PAD nella convoluzione, ADD residua,
+  depthwise, pooling, ridimensionamento, depth-to-space, concatenazione,
+  fully-connected) uguale su GPU e CPU; il warp dell'immagine YCbCr con bordo
+  nero e replicato; la conversione dei float16. `BenchmarkModels` misura le
+  reti.
+- `internal/bodypose`: la pipeline completa su due foto NASA confrontata con
+  MediaPipe 0.10.14 per le tre varianti; GPU uguale alla CPU sui punti e sulla
+  maschera; ancore, ritaglio ruotato e warp, NMS pesata, filtro One Euro,
+  angoli, distanza e postura (in piedi, seduto, sdraiato) su pose sintetiche.
+- `internal/vk`: copia dalla CPU alla memoria della GPU e ritorno con un
+  programma rieseguito, riempimento e timestamp.
+- `internal/webcam` (condiviso da `webcam-face` e `webcam-body`): numeri degli
+  ioctl V4L2 uguali a quelli del kernel a 64 bit; estrazione della luminanza
+  e dei colori da YUYV con padding di riga e frame troncati; scelta della
+  modalità sull'elenco della C925e (la più veloce, la più grande a 30 fps, la
+  risoluzione o la frequenza più vicine, YUYV a parità di modalità); nomi e
+  valori dei controlli come in `v4l2-ctl`; il decoder MJPEG confrontato con
+  `image/jpeg` su JPEG scritti dal test con restart, 4:2:2, 4:2:0, 4:4:4,
+  grigio, bordi parziali e codici di Huffman fino a 16 bit, a una e più
+  goroutine, senza allocazioni, sia per la luminanza sia per Cb e Cr (scarto
+  massimo un livello); frame troncati, rovinati a caso e progressivi (errore o
+  `image/jpeg`, mai un panic; c'è anche `FuzzMJPEG`). Con `WEBCAM_FACE_MJPEG`
+  (uno stream salvato da `v4l2-ctl --stream-to`) confronta e misura il
+  decoder su frame veri.
+- `examples/webcam-body`: clic sui radio button (tipologia, variante
+  disabilitata col mezzo busto, GPU assente), cambio di modello a caldo nel
+  motore con un frame vero, interfaccia disegnata senza X (con
+  `TOBII4C_BODY_PNG=<dir>` salva le schermate), segmenti spessi ritagliati.
+  I test che usano i modelli si saltano se la cache è vuota.
 - `internal/headpose`: Procrustes, angoli di Eulero e loro convenzioni,
   ritaglio; una testa sintetica in pose note proiettata con una camera nota
   (errore < 0,11°); calibrazione della camera da coppie sintetiche, con
@@ -880,9 +1117,7 @@ resumed`.
   ricodifica il frame gaze dell'ET5 byte per byte uguale e decodifica track
   box, proprietà e log catturati dal 4C. `internal/x11ui` verifica che la
   cache dei glifi disegni pixel per pixel come il rasterizzatore.
-- `examples/webcam-face`: numeri degli ioctl V4L2 uguali a quelli del kernel
-  a 64 bit; estrazione della luminanza da YUYV con padding di riga e frame
-  troncati; ammiccamenti contati, e nessuno se lo sguardo resta basso; il
+- `examples/webcam-face`: ammiccamenti contati, e nessuno se lo sguardo resta basso; il
   modello vero su un frame e l'interfaccia disegnata senza X e senza webcam a
   più dimensioni, compreso il passaggio all'anteprima diretta durante una
   ricerca. Con `TOBII4C_FACE_IMAGE` usa un viso vero, con `WEBCAM_FACE_PNG`
@@ -950,6 +1185,11 @@ resumed`.
   per occhio (0x04/0x0a), centro del bulbo oculare (0x17/0x18), posizione 2D
   rispetto al sensore (0x19/0x1a), guida al posizionamento (0x25–0x28) e 0x11,
   senza nome. `tobii4c dump` e la finestra `telemetry` le mostrano.
+- **Scheletro dalla webcam** (`examples/webcam-body`): una persona alla
+  volta; il mezzo busto è il modello del 2020, più debole del corpo intero sui
+  primi piani molto inclinati; le distanze dipendono da `-fov`; la GPU serve
+  Vulkan 1.1 (provato solo su RADV con una Radeon RX 6800 XT). I modelli si
+  scaricano al primo uso: senza rete e senza cache il programma non parte.
 - Testato su un solo esemplare 4C (firmware 4.7.0). Un firmware diverso con
   colonne diverse viene segnalato all'avvio e si gestisce con `-keymap`.
 

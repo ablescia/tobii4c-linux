@@ -1,0 +1,27 @@
+#version 450
+// RESIZE_BILINEAR di TFLite (align_corners / half_pixel_centers).
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P {
+	uint IH, IW, C, OH, OW, x, y, sy, sx, halfPx;
+} p;
+
+void main() {
+	uint idx = linearID(256u);
+	if (idx >= p.OH * p.OW * p.C) return;
+	uint c = idx % p.C, pix = idx / p.C;
+	uint ox = pix % p.OW, oy = pix / p.OW;
+	float scy = uintBitsToFloat(p.sy), scx = uintBitsToFloat(p.sx);
+	float fy = (p.halfPx != 0u) ? (float(oy) + 0.5) * scy - 0.5 : float(oy) * scy;
+	float fx = (p.halfPx != 0u) ? (float(ox) + 0.5) * scx - 0.5 : float(ox) * scx;
+	int y0 = max(int(floor(fy)), 0), y1 = min(int(ceil(fy)), int(p.IH) - 1);
+	int x0 = max(int(floor(fx)), 0), x1 = min(int(ceil(fx)), int(p.IW) - 1);
+	float dy = fy - float(y0), dx = fx - float(x0);
+	float v00 = A[p.x + (uint(y0) * p.IW + uint(x0)) * p.C + c];
+	float v01 = A[p.x + (uint(y0) * p.IW + uint(x1)) * p.C + c];
+	float v10 = A[p.x + (uint(y1) * p.IW + uint(x0)) * p.C + c];
+	float v11 = A[p.x + (uint(y1) * p.IW + uint(x1)) * p.C + c];
+	A[p.y + idx] = v00 * (1.0 - dy) * (1.0 - dx) + v10 * dy * (1.0 - dx) + v01 * (1.0 - dy) * dx + v11 * dy * dx;
+}

@@ -9,66 +9,11 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/ablescia/tobii4c-linux/internal/headpose"
 	"github.com/ablescia/tobii4c-linux/internal/irimg"
+	"github.com/ablescia/tobii4c-linux/internal/webcam"
 )
-
-// I numeri degli ioctl derivano dalle dimensioni delle strutture: devono
-// coincidere con quelli di <linux/videodev2.h> su Linux a 64 bit.
-func TestIoctlNumbers(t *testing.T) {
-	if unsafe.Sizeof(uintptr(0)) != 8 {
-		t.Skip("valori di riferimento a 64 bit")
-	}
-	for _, c := range []struct {
-		name      string
-		got, want uintptr
-	}{
-		{"VIDIOC_QUERYCAP", vidiocQueryCap, 0x80685600},
-		{"VIDIOC_ENUM_FMT", vidiocEnumFmt, 0xc0405602},
-		{"VIDIOC_G_FMT", vidiocGFmt, 0xc0d05604},
-		{"VIDIOC_S_FMT", vidiocSFmt, 0xc0d05605},
-		{"VIDIOC_REQBUFS", vidiocReqBufs, 0xc0145608},
-		{"VIDIOC_QUERYBUF", vidiocQueryBuf, 0xc0585609},
-		{"VIDIOC_QBUF", vidiocQBuf, 0xc058560f},
-		{"VIDIOC_DQBUF", vidiocDQBuf, 0xc0585611},
-		{"VIDIOC_STREAMON", vidiocStreamOn, 0x40045612},
-		{"VIDIOC_STREAMOFF", vidiocStreamOff, 0x40045613},
-		{"VIDIOC_G_PARM", vidiocGParm, 0xc0cc5615},
-		{"VIDIOC_S_PARM", vidiocSParm, 0xc0cc5616},
-		{"VIDIOC_G_CTRL", vidiocGCtrl, 0xc008561b},
-		{"VIDIOC_QUERYCTRL", vidiocQueryCtrl, 0xc0445624},
-		{"VIDIOC_QUERYMENU", vidiocQueryMenu, 0xc02c5625},
-	} {
-		if c.got != c.want {
-			t.Errorf("%s = %#x, atteso %#x", c.name, c.got, c.want)
-		}
-	}
-	var b v4l2Buffer
-	if off := unsafe.Offsetof(b.M); off != 64 {
-		t.Errorf("v4l2_buffer.m all'offset %d, atteso 64", off)
-	}
-}
-
-func TestToGrayYUYV(t *testing.T) {
-	const w, h, bpl = 4, 2, 10 // 2 byte di riempimento per riga
-	data := []byte{
-		10, 128, 20, 128, 30, 128, 40, 128, 0, 0,
-		50, 128, 60, 128, 70, 128, 80, 128, 0, 0,
-	}
-	dst := make([]byte, w*h)
-	if err := toGray(pixYUYV, data, w, h, bpl, dst); err != nil {
-		t.Fatal(err)
-	}
-	want := []byte{10, 20, 30, 40, 50, 60, 70, 80}
-	if string(dst) != string(want) {
-		t.Fatalf("luminanza %v, attesa %v", dst, want)
-	}
-	if err := toGray(pixYUYV, data[:12], w, h, bpl, dst); err == nil {
-		t.Fatal("frame troncato accettato")
-	}
-}
 
 func TestBlinker(t *testing.T) {
 	var b blinker
@@ -138,15 +83,16 @@ func TestRender(t *testing.T) {
 	}
 	f := testFrame(t)
 	eng := &Engine{det: det, Focal: 554, FOV: 60, Workers: 2, MACs: det.MACs(), Model: "incorporato", ModelOK: det.Verified,
-		Info: CamInfo{Path: "/dev/video0", Card: "Webcam di prova", Driver: "uvcvideo", Version: "7.2.15", Bus: "usb-test",
-			W: f.W, H: f.H, PixFmt: pixYUYV, BytesPerLine: 2 * f.W, FPS: 30, Formats: []string{"MJPG", "YUYV"},
-			Buffers: 4, BufferBytes: 2 * f.W * f.H, USB: USBInfo{ID: "1bcf:2281", Product: "prova", Speed: "480"}},
+		Info: webcam.CamInfo{Path: "/dev/video0", Card: "Webcam di prova", Driver: "uvcvideo", Version: "7.2.15", Bus: "usb-test",
+			W: f.W, H: f.H, PixFmt: webcam.PixYUYV, BytesPerLine: 2 * f.W, FPS: 30, Formats: []string{"MJPG", "YUYV"},
+			Buffers: 4, BufferBytes: 2 * f.W * f.H, USB: webcam.USBInfo{ID: "1bcf:2281", Product: "prova", Speed: "480"},
+			Choice: "automatica, la più veloce tra 36", Changed: []webcam.CtrlChange{{ID: 0x009a0903, Name: "exposure_dynamic_framerate", Old: 1}}},
 		ctrls: []Control{
-			{ID: 0x00980900, Name: "Brightness", Type: ctrlTypeInteger, Max: 255, Default: 128, Value: 137, OK: true},
-			{ID: 0x009a0901, Name: "Auto Exposure", Type: ctrlTypeMenu, Max: 3, Default: 3, Value: 3, OK: true,
+			{ID: 0x00980900, Name: "Brightness", Type: webcam.CtrlTypeInteger, Max: 255, Default: 128, Value: 137, OK: true},
+			{ID: 0x009a0901, Name: "Auto Exposure", Type: webcam.CtrlTypeMenu, Max: 3, Default: 3, Value: 3, OK: true,
 				Menu: map[int32]string{1: "Manual Mode", 3: "Aperture Priority Mode"}},
-			{ID: 0x009a0902, Name: "Exposure Time, Absolute", Type: ctrlTypeInteger, Max: 2047, Default: 166, Value: 166,
-				OK: true, Flags: ctrlFlagInactive},
+			{ID: 0x009a0902, Name: "Exposure Time, Absolute", Type: webcam.CtrlTypeInteger, Max: 2047, Default: 166, Value: 166,
+				OK: true, Flags: webcam.CtrlFlagInactive},
 		}}
 	for i := 0; i < 3; i++ { // ricerca, poi inseguimento se c'è un viso
 		f.seq = uint64(i + 1)

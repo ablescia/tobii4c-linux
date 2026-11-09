@@ -1,0 +1,19 @@
+#version 450
+// DEPTH_TO_SPACE (ordine DCR di TFLite).
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P {
+	uint IH, IW, IC, bs, x, y;
+} p;
+
+void main() {
+	uint OC = p.IC / (p.bs * p.bs), OW = p.IW * p.bs, OH = p.IH * p.bs;
+	uint idx = linearID(256u);
+	if (idx >= OH * OW * OC) return;
+	uint c = idx % OC, pix = idx / OC;
+	uint ox = pix % OW, oy = pix / OW;
+	uint ic = ((oy % p.bs) * p.bs + ox % p.bs) * OC + c;
+	A[p.y + idx] = A[p.x + ((oy / p.bs) * p.IW + ox / p.bs) * p.IC + ic];
+}
