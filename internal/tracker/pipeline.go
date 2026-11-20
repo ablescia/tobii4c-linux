@@ -40,11 +40,6 @@ type Sink interface {
 	Close() error
 }
 
-// StreamHook riceve i messaggi di stream diversi dal gaze (o tutti, vedi
-// Options.HookGaze). Chiamato dalla goroutine framer: payload va copiato se
-// conservato e la funzione deve essere veloce.
-type StreamHook func(stream uint32, rxNs int64, payload []byte)
-
 // HeadPose stima la rotazione della testa dalle immagini (internal/headpose).
 // Se Options.HeadPose non è nil il tracker sottoscrive lo stream immagine
 // 0x501 e:
@@ -72,7 +67,6 @@ type Options struct {
 	DisplaySpec *DisplaySpec     // oppure schermo L×A + offset, calcolato col mounting
 	// CalibrationBlob, se presente, viene applicato (op 1110) a ogni connessione.
 	CalibrationBlob []byte
-	ExtraStreams    []uint32 // stream aggiuntivi da sottoscrivere
 	Presence        bool     // sottoscrive 0x504 e ne copia l'ultimo stato in ogni campione; se rifiutato resta PresenceUnknown
 	HeadPose        HeadPose // pitch della testa dalle immagini 0x501 (nil = disattivato)
 	// ImagesWhenAway: con HeadPose e Presence, lo stream immagine resta attivo
@@ -86,8 +80,6 @@ type Options struct {
 	StatsInterval  time.Duration // log periodico delle statistiche (0 = disattivato)
 	ReconnectMin   time.Duration
 	ReconnectMax   time.Duration
-	Hook           StreamHook
-	HookGaze       bool // passa anche il gaze all'hook (modalità dump)
 	NoSubscribe    bool // solo handshake e interrogazioni (modalità info)
 	FailFast       bool // un errore di apertura termina Run invece di riprovare
 	OnReady        func(*Session) error
@@ -464,11 +456,6 @@ func (s *Session) route(msg []byte, rx int64) {
 		}
 
 	case ttp.MarkerStream:
-		if h.Op != ttp.StreamGaze || s.t.opt.HookGaze {
-			if hk := s.t.opt.Hook; hk != nil {
-				hk(h.Op, rx, payload)
-			}
-		}
 		if h.Op != ttp.StreamGaze {
 			s.t.Stats.OtherStream.Add(1)
 			switch {

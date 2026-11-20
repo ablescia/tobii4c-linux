@@ -36,9 +36,7 @@ go.work.sum
 /bin/
 *.prof
 
-# tobii4c: artefatti prodotti dal driver: log, immagini IR di
-# `tobii4c dump -images`, modelli ONNX di prova (quello del viso è versionato)
+# tobii4c: log e modelli ONNX di prova (quello del viso è versionato)
 *.log
 *.onnx
 !/internal/facemodel/face_landmarks_detector.onnx
-*.pgm

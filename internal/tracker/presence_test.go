@@ -75,8 +75,8 @@ func TestSecondaryStreams(t *testing.T) {
 	}{
 		{Options{}, nil},
 		{Options{Presence: true}, []uint32{ttp.StreamPresence}},
-		{Options{Presence: true, ExtraStreams: []uint32{0x504, 0x501, 0x500, 0x501}}, []uint32{0x504, 0x501}},
-		{Options{ExtraStreams: []uint32{0x501}}, []uint32{0x501}},
+		{Options{Presence: true, HeadPose: &fakeHeadPose{}}, []uint32{ttp.StreamPresence, ttp.StreamImage}},
+		{Options{HeadPose: &fakeHeadPose{}}, []uint32{ttp.StreamImage}},
 	}
 	for _, c := range cases {
 		tr := &Tracker{opt: c.opt}

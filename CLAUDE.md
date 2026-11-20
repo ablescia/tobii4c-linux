@@ -4,24 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-User-space driver (pure Go, no kernel module, no proprietary Tobii binaries) for the **Tobii Eye Tracker 4C** (`2104:0127`, IS4 generation). It speaks the reconstructed TTP protocol directly over the USB bulk endpoints via `google/gousb` (libusb-1.0), extracts gaze/eye/pupil/head data at 90 Hz, and forwards it over local UDP and/or Lab Streaming Layer. Head pitch (not derivable from the eyes alone) is estimated from the sensor's IR images with a MediaPipe face-landmark model run by a pure-Go ONNX interpreter.
+User-space driver (pure Go, no kernel module, no proprietary Tobii binaries) for the **Tobii Eye Tracker 4C** (`2104:0127`, IS4 generation). It speaks the reconstructed TTP protocol directly over the USB bulk endpoints via `google/gousb` (libusb-1.0), extracts gaze/eye/pupil/head data at 90 Hz, and forwards it over local UDP and/or Lab Streaming Layer. Head pitch (not derivable from the eyes alone) is estimated from the sensor's IR images with a MediaPipe face-landmark model run by a pure-Go ONNX interpreter. The scope is deliberately narrow: streaming for other programs, gaze calibration, head-pose camera calibration, systemd user service.
 
 ## Language conventions
 
-The README, commit messages, and all code comments are written in **Italian**. Match this: write new comments and commit messages in Italian, keep Go identifiers in English as is standard. README verification tables cite real measurements with dates — do not alter measured figures unless re-measured.
+The README, commit messages, and all code comments are written in **Italian** (the README opens with a short English abstract). Match this: write new comments and commit messages in Italian, keep Go identifiers and slog messages in English as is standard. README verification tables cite real measurements with dates — do not alter measured figures unless re-measured.
 
 ## Commands
 
 ```sh
-make build       # go build -trimpath -o bin/tobii4c ./cmd/tobii4c
-make build-lsl   # same, with -tags lsl (needs liblsl: lsl_c.h + liblsl.so)
-make webcam-face # examples/webcam-face → bin/webcam-face (face model on a V4L2 webcam, no 4C)
-make webcam-body # examples/webcam-body → bin/webcam-body (MediaPipe Pose skeleton on the GPU, no 4C)
-make shaders     # go generate ./internal/tflite: GLSL → SPIR-V with glslc (only after editing shaders/*.comp)
-make test        # go vet ./... && go test ./...  (no device required)
-make bench       # go test -bench . -benchmem ./internal/...
-make race        # go build -race -o bin/tobii4c-race
-make install     # → $PREFIX/bin (default ~/.local); install-lsl builds with LSL
+make build            # go build -trimpath -o bin/tobii4c ./cmd/tobii4c
+make build-lsl        # same, with -tags lsl (needs liblsl: lsl_c.h + liblsl.so)
+make test             # go vet ./... && go test ./...  (no device required)
+make bench            # go test -bench . -benchmem ./internal/...
+make race             # go build -race -o bin/tobii4c-race
+make install          # → $PREFIX/bin (default ~/.local); install-lsl builds with LSL; uninstall
+make install-service  # systemd/tobii4c.service → ~/.config/systemd/user, binary path from $PREFIX; uninstall-service
 make install-udev / uninstall-udev
 ```
 
@@ -30,14 +28,15 @@ Single test / package:
 go test ./internal/ttp/ -run TestName -v
 go test -race ./internal/calib/      # calib flow test uses the simulator, runs under -race
 go test -run '^$' -bench . -benchmem ./internal/nn/
-go test -run '^$' -bench Models ./internal/tflite   # pose networks, CPU vs GPU
 ```
 
 Go ≥ 1.22. The LSL sink (`internal/sink/lsl*.go`) and its `lsl-recv` command are behind the `lsl` build tag and use cgo; without the tag `lsl_stub.go` is compiled. The nn package has AVX2/FMA assembly (`simd_amd64.s`) with a pure-Go fallback (`simd_other.go`).
 
 ## Running / debugging on the device
 
-The driver needs exclusive USB access, so **stop the systemd user service first** (`systemctl --user stop tobii4c`) or device commands fail with `device or resource busy`. USB access without root comes from the udev rule (`uaccess` ACL requires an *active local session*, not SSH-only). Key subcommands (all in `cmd/tobii4c/`): `run`, `info`, `dump` (generic decode / IR frame capture for reverse engineering), `recv` (test UDP receiver), `calibrate`, `headpose-calibrate`, `calibration save|apply|restore`, `display`, `face`, `lsl-recv`, `telemetry`, `udev`, `keymap`. `calibrate -simulate`, `telemetry -simulate` and `headpose-calibrate` run the UIs without hardware (use Xvfb for headless). `telemetry` runs the driver inside a normal (managed) X11 window and, before opening the device, finds any user systemd service holding the USB node (via `/proc/*/fd` + cgroup) and asks in-window to stop it, restarting it on exit. Its dashboard renders to an `*image.RGBA` without X: `TOBII4C_TELEMETRY_PNG=<dir> TOBII4C_FACE_IMAGE=<pgm> go test ./internal/telemetry -run TestRender` saves screenshots for visual checks; `-autoshot`/`-duration` do the same live.
+The driver needs exclusive USB access, so **stop the systemd user service first** (`systemctl --user stop tobii4c`) or device commands fail with `device or resource busy`. Other user services can hold the tracker too (e.g. a `tobii-ws` bridge that spawns `tobii4c run`). USB access without root comes from the udev rule (`uaccess` ACL requires an *active local session*, not SSH-only). Subcommands (all in `cmd/tobii4c/`): `run`, `calibrate`, `headpose-calibrate`, `calibration save|apply|restore`, `display`, `info`, `recv` (test UDP receiver), `lsl-recv`, `udev`. `calibrate -simulate` runs the calibration UI without hardware (use Xvfb for headless).
+
+The 4C forgets display area and calibration when unpowered, so `run -display-mm saved -calibration saved` (used by the systemd unit) rewrites them from `~/.config/tobii4c` on every connection; with `saved`, a missing file is a logged warning, not an error.
 
 Unit tests never touch the device; they replay real ET5 USB captures in `internal/ttp/testdata/` (MIT-licensed) and assert bit-exact decode against Stream Engine output.
 
@@ -50,7 +49,7 @@ reader → framer → worker×N → emitter → sinks (UDP / LSL / stdout)
 ```
 
 - **reader**: the only goroutine touching the USB IN endpoint (`0x83`); keeps N transfers (default 16×64 KiB) queued in the kernel. Just reads and forwards.
-- **framer**: reassembles TTP messages (fragmentation, coalescing, resync, chunked responses), routes responses to waiting requests by `seq`+`op`, copies gaze frames into pre-allocated pool buffers, tracks presence state and stamps it onto gaze frames in USB arrival order. Drops frames (`host_drops`) rather than accumulating latency when saturated.
+- **framer**: reassembles TTP messages (fragmentation, coalescing, resync, chunked responses), routes responses to waiting requests by `seq`+`op`, copies gaze frames into pre-allocated pool buffers, tracks presence state and stamps it onto gaze frames in USB arrival order, hands IR images to the head-pose estimator without blocking. Drops frames (`host_drops`) rather than accumulating latency when saturated.
 - **worker**: decode TLV → XDS row → fixed-size `gaze.Sample` (passed by value, no allocation).
 - **emitter**: restores order via a seq-indexed ring, detects device frame-counter gaps (`device_drops`), writes to sinks, then returns the frame buffer to the pool. Also passes each sample to the head-pose estimator before the sinks.
 - **supervisor**: watchdog, keep-alive, ordered shutdown, hotplug reconnection with exponential backoff.
@@ -73,30 +72,31 @@ Buffers return to their pool only *after* emission, which bounds in-flight frame
 | `internal/tracker` | the concurrent pipeline, handshake, watchdog, reconnection |
 | `internal/sink` | UDP (T4CG v2 packet), LSL (cgo, `lsl` tag), stdout |
 | `internal/calib` | gaze calibration: fixation, collect, compute, backup/restore, accuracy metrics, simulator |
-| `internal/calibui`, `internal/x11ui` | full-screen calibration UI; pure-Go X11 windows (`jezek/xgb`): full-screen override-redirect (`Open`) or managed/resizable (`OpenWindow`), RandR/EDID, antialiased drawing, glyph cache |
-| `internal/irimg` | 0x501 image-stream decode, PGM |
-| `internal/nn` | minimal pure-Go ONNX interpreter (subset of ops) with AVX2/FMA asm kernels; `export.go` exposes the axpy kernels to `internal/tflite` |
-| `internal/tflite` | pure-Go TFLite reader (flatbuffers, float16 and sparse/DENSIFY weights) → `Graph`: NHWC plan with PAD→conv and conv→ADD fusion, full-cover convs as GEMM, HWIO weights, lifetime-based arena. Same plan runs on `GPU` (Vulkan, GLSL in `shaders/`, SPIR-V committed in `spv/` and `go:embed`-ed; one pre-recorded command buffer per model; YCbCr→RGB rotated crop done by `warp.comp`) or `CPU` (fallback/reference) |
-| `internal/vk` | minimal Vulkan compute binding loaded at runtime via purego (no cgo): device, buffers, pipelines with one shared layout (2 storage buffers + 128 B push constants), programs, timestamps |
-| `internal/bodypose` | MediaPipe Pose: model specs (downloaded to `~/.cache/tobii4c/models`, SHA-256 pinned), SSD detector + weighted NMS, rotated ROI, landmarks + heatmap refine, One Euro filters, tracking; `Measure` (joint angles, posture, lean, distance). Full body = Pose Landmarker lite/full/heavy (33 pts + 3D); upper body = MediaPipe 0.8.3 upper-body model (25 pts) |
-| `internal/webcam` | shared by both webcam examples: pure-Go V4L2 capture (ioctl + mmap; picks the fastest mode via ENUM_FRAMESIZES/INTERVALS, pins the frame rate, restores changed controls on exit) and the zero-alloc MJPEG decoder split across goroutines at restart markers (`mjpeg.go`, luma only via `Converter.Gray`, plus Cb/Cr via `Converter.Convert`; falls back to `image/jpeg`) |
-| `internal/headpose` | face landmarks, canonical-model fit, auto camera calibration, screen-space pitch |
+| `internal/calibui`, `internal/x11ui` | full-screen calibration and head-pose calibration UIs; pure-Go X11 override-redirect window (`jezek/xgb`) on one RandR monitor, EDID, antialiased drawing, glyph cache |
+| `internal/irimg` | 0x501 image-stream decode |
+| `internal/nn` | minimal pure-Go ONNX interpreter (subset of ops) with AVX2/FMA asm kernels |
+| `internal/headpose` | face landmarks, canonical-model fit, camera calibration, screen-space pitch |
 | `internal/facemodel` | the 4.9 MB MediaPipe ONNX model, `go:embed`-ed into the binary |
-| `internal/telemetry` | telemetry window: `Collector` (framer hook for raw rows of every stream, emitter sink, session callbacks) and the dashboard; simulator |
 | `internal/store` | `~/.config/tobii4c`: calibration, display geometry, camera calibration, backups |
-| `cmd/tobii4c` | CLI (one file per subcommand) |
-| `examples/webcam-face` | standalone example: `internal/webcam` (luma only) → `headpose.Detector` → full-screen x11ui window with B/W preview and telemetry; `-png` renders without X |
-| `examples/webcam-body` | one program for full body and half body (radio buttons / `-mode`), variant and GPU/CPU switchable live; color preview, skeleton, mask, posture/joints/3D/model/GPU cards; `-png` renders without X |
+| `cmd/tobii4c` | CLI (one file per subcommand group) |
 
-### GPU path gotchas
+The head-pose code must not write face images or landmarks to disk: only `camera.json` and `headpose-user.json` are persisted.
 
-- `internal/vk` calls C through `purego.SyscallN` wrapped by `call` (`//go:uintptrescapes`). Pointer arguments **must** be written as `uintptr(unsafe.Pointer(&x))` directly in the call's argument list: converting in a helper hides the pointer from the compiler, `x` can stay on the stack, the stack can move before the call and the driver writes to stale memory (seen as `vkEnumeratePhysicalDevices` returning 0 GPUs only at some stack depths).
-- Struct layouts in `vk.go` mirror the C ones by hand (amd64/arm64); offsets into `VkPhysicalDeviceLimits` are hard-coded (checked against `vulkaninfo`).
-- Tests that need the pose models read them from the cache and skip when absent; reference outputs (LiteRT, MediaPipe 0.10.14) live in `internal/tflite/testdata` and `internal/bodypose/testdata`.
+## Interfaces other programs rely on
+
+External programs (Kite, a gaze keyboard; `tobii-ws`, a WebSocket bridge) depend on the driver, so treat these as a public API and keep them backward compatible:
+
+- the **T4CG v2 UDP packet** (below);
+- `tobii4c run` flags `-udp`, `-log-format json`, `-stats`, `-headpose on|off`, `-headpose-images-always`, `-headpose-rate`, `-headpose-rotation`, `-calibration`, `-display-mm`;
+- JSON log messages of `run`: `udp output`, `usb device opened` (`bus`, `addr`, `serial`), `device identity` (`strings`), `display area (device)` / `display area set` (`area`, format of `ttp.DisplayArea.String()`), `calibration applied` / `calibration apply failed`, `subscribed` (`stream` starting with `0x500`), `usb device disconnected` / `session ended, reconnecting` (`err`); fatal errors as `errore: …` on stderr, exit code 1;
+- `tobii4c calibrate -log-format json [-monitor NAME]` and `tobii4c headpose-calibrate [-monitor NAME]`, with log messages `calibration started`, `validation point` (`error_deg`, `precision_deg`), `calibration finished`, `calibration aborted` (`restored_previous`); SIGINT cancels and restores the previous calibration;
+- the files in `~/.config/tobii4c` (`display.json` fields `width_mm`, `height_mm`, `offset_x_mm`, `monitor`; `calibration.bin`; `camera.json`; `headpose-user.json`) and the unit name `tobii4c.service`.
+
+The README section "Integrare il driver in un'applicazione" documents the same list.
 
 ## Output formats
 
-- **UDP T4CG v2**: 192-byte little-endian packet per sample; first 120 bytes are v1-compatible, new fields appended. Full layout and the `struct.unpack` format string are in the README ("Output UDP") and mirrored in `internal/sink` + `examples/recv.py`. Both v1 and v2 readers exist. Always honor the validity-flag bits — unseen fields are zeroed (or −1 for pupils/openness), not omitted.
+- **UDP T4CG v2**: 192-byte little-endian packet per sample; first 120 bytes are v1-compatible, new fields appended. Full layout and the `struct.unpack` format string are in the README ("Formato UDP T4CG v2") and mirrored in `internal/sink` + `examples/recv.py`. Both v1 and v2 readers exist. Always honor the validity-flag bits — unseen fields are zeroed (or −1 for pupils/openness), not omitted.
 - **LSL**: 27 float32 channels; invalid values are NaN.
 
 When changing the packet layout, update in lockstep: the writer in `internal/sink`, the round-trip test, `examples/recv.py`, the `recv` command, and the README table.

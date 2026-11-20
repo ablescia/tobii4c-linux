@@ -96,39 +96,3 @@ func headInDisplay(Rcam mat3, cam *Camera, toDisplay mat3) HeadRotation {
 }
 
 func deg(r float64) float64 { return r * 180 / math.Pi }
-
-// CameraRelativePose stima la posa della testa rispetto all'asse ottico di
-// una camera ipotetica (focale 700 px, punto principale al centro), senza
-// calibrazione: solo per controlli a vista (comando face).
-func CameraRelativePose(lm *Landmarks, w, h int) (pitch, yaw, roll float64) {
-	p, ok := PoseInCamera(lm, w, h, 700)
-	if !ok {
-		return math.NaN(), math.NaN(), math.NaN()
-	}
-	return p.Pitch, p.Yaw, p.Roll
-}
-
-// FacePose è la posa del viso rispetto a una camera qualsiasi, non legata al
-// tracker (es. una webcam).
-type FacePose struct {
-	Pitch, Yaw, Roll float64 // rad, come Euler con lo "schermo" sulla camera
-	// Center è l'origine del modello canonico (dietro la radice del naso)
-	// nel sistema della camera, mm: x a destra nell'immagine, y in basso,
-	// z lungo l'asse ottico.
-	Center [3]float64
-}
-
-// PoseInCamera stima la posa del viso rispetto all'asse ottico di una camera
-// pinhole con focale focal (pixel) e punto principale al centro
-// dell'immagine w×h. Senza calibrazione la focale è un'ipotesi: gli angoli
-// ne dipendono poco, la distanza in proporzione.
-func PoseInCamera(lm *Landmarks, w, h int, focal float64) (FacePose, bool) {
-	cam := &Camera{F: focal, CX: float64(w) / 2, CY: float64(h) / 2, R: ident3, W: w, H: h}
-	Rc, center, ok := headInCamera(lm, cam)
-	if !ok {
-		return FacePose{}, false
-	}
-	// "schermo" coincidente con la camera, rivolto all'utente: X = −x, Y = −y, Z = +z
-	hr := headInDisplay(Rc, cam, mat3{{-1, 0, 0}, {0, -1, 0}, {0, 0, 1}})
-	return FacePose{Pitch: hr.Pitch, Yaw: hr.Yaw, Roll: hr.Roll, Center: center}, true
-}

@@ -1,15 +1,19 @@
-# Unit utente: ~/.config/systemd/user/tobii4c.service
-#   systemctl --user daemon-reload && systemctl --user enable --now tobii4c
-# Richiede la regola udev (uaccess) installata: nessun privilegio di root.
+# Unit utente del driver: ~/.config/systemd/user/tobii4c.service
+#   make install install-service
+#   systemctl --user enable --now tobii4c
+# Richiede la regola udev (uaccess): nessun privilegio di root.
 [Unit]
-Description=Tobii 4C user-space driver (gaze + head -> UDP 127.0.0.1:5005)
+Description=Tobii Eye Tracker 4C user-space driver (gaze, eyes, head -> UDP 127.0.0.1:5005)
+Documentation=https://github.com/ablescia/tobii4c-linux
 
 [Service]
-ExecStart=%h/.local/bin/tobii4c run -udp 127.0.0.1:5005 -log-format json
+# Il 4C dimentica display area e calibrazione quando resta senza
+# alimentazione: "saved" le riscrive a ogni connessione da ~/.config/tobii4c
+# (file creati da `tobii4c calibrate`). Se mancano, il driver lo segnala nel
+# log e parte comunque.
+ExecStart=%h/.local/bin/tobii4c run -udp 127.0.0.1:5005 -display-mm saved -calibration saved -log-format json
 Restart=on-failure
 RestartSec=2
-# Priorità realtime soft per il thread di lettura (opzionale, richiede rtkit/limiti):
-#Nice=-5
 
 [Install]
 WantedBy=default.target

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -25,17 +26,60 @@ func parseSize(s string) (w, h float64, err error) {
 	return w, h, nil
 }
 
-func loadCalibrationArg(path string) ([]byte, error) {
-	if path == "" {
+// loadCalibrationArg interpreta -calibration di run: un file, oppure "saved"
+// per quello scritto da tobii4c calibrate. Con "saved" un file mancante non è
+// un errore: il servizio deve partire anche prima della prima calibrazione.
+func loadCalibrationArg(arg string, log *slog.Logger) ([]byte, error) {
+	if arg == "" {
 		return nil, nil
 	}
-	if path == "saved" {
+	path := arg
+	if arg == "saved" {
 		p, err := store.CalibrationPath()
 		if err != nil {
 			return nil, err
 		}
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+			log.Warn("no saved calibration: the tracker keeps its current one (run tobii4c calibrate)", "path", p)
+			return nil, nil
+		}
 		path = p
 	}
+	return readCalibration(path)
+}
+
+// loadDisplayArg interpreta -display-mm di run: LARGHEZZAxALTEZZA in mm,
+// oppure "saved" per la geometria salvata da tobii4c calibrate
+// (display.json). Il 4C torna alla display area di fabbrica quando resta
+// senza alimentazione, quindi il servizio la riscrive a ogni connessione.
+// Con "saved" un file mancante non è un errore.
+func loadDisplayArg(arg string, offsetX float64, log *slog.Logger) (*tracker.DisplaySpec, error) {
+	switch arg {
+	case "":
+		return nil, nil
+	case "saved":
+		d, err := store.LoadDisplay()
+		if errors.Is(err, os.ErrNotExist) {
+			log.Warn("no saved display geometry: the tracker keeps its current display area (run tobii4c calibrate)")
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("display.json: %w", err)
+		}
+		if d.WidthMM <= 0 || d.HeightMM <= 0 {
+			return nil, fmt.Errorf("display.json: dimensioni non valide (%gx%g mm)", d.WidthMM, d.HeightMM)
+		}
+		return &tracker.DisplaySpec{WidthMM: d.WidthMM, HeightMM: d.HeightMM, OffsetXMM: d.OffsetXMM}, nil
+	}
+	w, h, err := parseSize(arg)
+	if err != nil {
+		return nil, fmt.Errorf("-display-mm: %w", err)
+	}
+	return &tracker.DisplaySpec{WidthMM: w, HeightMM: h, OffsetXMM: offsetX}, nil
+}
+
+// readCalibration legge un blob di calibrazione e ne controlla la dimensione.
+func readCalibration(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("calibrazione: %w", err)
@@ -110,7 +154,7 @@ func cmdCalibration(args []string) error {
 			}
 			path = b[0]
 		}
-		blob, err := loadCalibrationArg(path)
+		blob, err := readCalibration(path)
 		if err != nil {
 			return err
 		}

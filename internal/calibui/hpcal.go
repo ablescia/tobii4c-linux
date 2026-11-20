@@ -234,7 +234,6 @@ type hpIntro struct {
 	lay    hpLayout
 	dist   gauge
 	status headpose.Status
-	msgY   int
 }
 
 func newHPIntro(ses *hpSession) *hpIntro { return &hpIntro{ses: ses} }

@@ -1,16 +1,12 @@
 package headpose
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
-	"sync"
 
-	"github.com/ablescia/tobii4c-linux/internal/gaze"
 	"github.com/ablescia/tobii4c-linux/internal/irimg"
 )
 
@@ -96,7 +92,6 @@ func (e *Estimator) CalibrateNow(done func(*Camera, CalibQuality, error)) {
 	if w == 0 {
 		w, h = 640, 480
 	}
-	e.saveSamples(snap)
 	go func() {
 		if len(snap) < 60 {
 			done(nil, CalibQuality{}, fmt.Errorf("troppo pochi campioni (%d)", len(snap)))
@@ -240,83 +235,4 @@ func (e *Estimator) LatestPreview(dst *Preview) bool {
 	*dst = e.prev
 	dst.Pix = pix
 	return true
-}
-
-// --- registrazione per l'analisi --------------------------------------------
-
-// recorder scrive frames.jsonl (landmark utili alla calibrazione, per ogni
-// immagine elaborata con un viso) e gaze.jsonl (ogni campione del tracker).
-type recorder struct {
-	mu     sync.Mutex
-	frames *bufio.Writer
-	gazes  *bufio.Writer
-	files  []*os.File
-	n      int
-}
-
-// recordedLandmarks: base di Procrustes, iridi e angoli degli occhi.
-var recordedLandmarks = func() []int {
-	ids := []int{lmRightIris, lmLeftIris, lmRightEyeOuter, lmRightEyeInner, lmLeftEyeOuter, lmLeftEyeInner}
-	for _, p := range procrustesBasis {
-		ids = append(ids, p.id)
-	}
-	return ids
-}()
-
-func newRecorder(dir string) (*recorder, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	r := &recorder{}
-	for _, name := range []string{"frames.jsonl", "gaze.jsonl"} {
-		f, err := os.Create(filepath.Join(dir, name))
-		if err != nil {
-			r.close()
-			return nil, err
-		}
-		r.files = append(r.files, f)
-	}
-	r.frames, r.gazes = bufio.NewWriterSize(r.files[0], 1<<16), bufio.NewWriterSize(r.files[1], 1<<16)
-	ids, _ := json.Marshal(recordedLandmarks)
-	fmt.Fprintf(r.frames, "{\"landmark_ids\":%s}\n", ids)
-	return r, nil
-}
-
-func (r *recorder) frame(us int64, score float64, lm *Landmarks, mirrored bool, w int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	fmt.Fprintf(r.frames, "{\"us\":%d,\"score\":%.3f,\"mirrored\":%v,\"w\":%d,\"lm\":[", us, score, mirrored, w)
-	for i, id := range recordedLandmarks {
-		if i > 0 {
-			r.frames.WriteByte(',')
-		}
-		fmt.Fprintf(r.frames, "[%.2f,%.2f,%.2f]", lm[id][0], lm[id][1], lm[id][2])
-	}
-	r.frames.WriteString("]}\n")
-}
-
-func (r *recorder) gaze(s *gaze.Sample) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	h := s.Head
-	fmt.Fprintf(r.gazes, "{\"us\":%d,\"l\":[%.2f,%.2f,%.2f],\"r\":[%.2f,%.2f,%.2f],\"lv\":%v,\"rv\":%v,\"yaw\":%.4f,\"roll\":%.4f,\"hv\":%v,\"pres\":%d}\n",
-		s.DeviceTimeUs, s.Left.OriginMM[0], s.Left.OriginMM[1], s.Left.OriginMM[2],
-		s.Right.OriginMM[0], s.Right.OriginMM[1], s.Right.OriginMM[2], s.Left.OriginValid, s.Right.OriginValid,
-		h.RotationRad[1], h.RotationRad[2], h.RotationValid[1] && h.RotationValid[2], s.Presence)
-	if r.n++; r.n%90 == 0 {
-		r.gazes.Flush()
-		r.frames.Flush()
-	}
-}
-
-func (r *recorder) close() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.frames != nil {
-		r.frames.Flush()
-		r.gazes.Flush()
-	}
-	for _, f := range r.files {
-		f.Close()
-	}
 }

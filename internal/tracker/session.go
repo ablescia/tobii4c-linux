@@ -320,7 +320,7 @@ func (s *Session) pauseImagesIfDue(now time.Time) {
 }
 
 // secondaryStreams sono gli stream da sottoscrivere dopo il gaze: presence
-// (se richiesto) e gli extra, senza duplicati.
+// e immagine, se richiesti.
 func (t *Tracker) secondaryStreams() []uint32 {
 	var ids []uint32
 	add := func(id uint32) {
@@ -333,9 +333,6 @@ func (t *Tracker) secondaryStreams() []uint32 {
 	}
 	if t.opt.HeadPose != nil {
 		add(ttp.StreamImage)
-	}
-	for _, id := range t.opt.ExtraStreams {
-		add(id)
 	}
 	return ids
 }
@@ -432,7 +429,7 @@ func (s *Session) checkKeyMap(cols []ttp.Record) {
 		}
 	}
 	if len(missing) > 0 {
-		s.log.Warn("keymap keys not declared by the device: rivedi con `tobii4c info` e -keymap",
+		s.log.Warn("keymap keys not declared by the device: firmware non provato, segnalalo con l'output di `tobii4c info`",
 			"missing", strings.Join(missing, ","))
 		return
 	}

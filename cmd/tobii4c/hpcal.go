@@ -2,12 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,16 +23,8 @@ func cmdHeadPoseCalibrate(args []string) error {
 	var c common
 	c.register(fs)
 	monName := fs.String("monitor", "", "monitor da usare (default: il primario); vedi tobii4c calibrate -monitors")
-	model := fs.String("model", "", "modello ONNX dei landmark del viso (default: quello incorporato nel binario)")
-	sessions := fs.String("sessions", "", "cartella delle registrazioni (default ~/.cache/tobii4c/headpose)")
-	shots := fs.Bool("screenshots", false, "salva anche la finestra come PNG nella cartella della sessione")
-	from := fs.String("from", "", "senza interfaccia: ricalcola la calibrazione della camera da sessioni registrate (cartelle separate da virgole) e la salva")
-	serial := fs.String("serial", "", "con -from: numero di serie del 4C (default: quello registrato nella sessione)")
 	fs.Parse(args)
 	log := c.logger()
-	if *from != "" {
-		return calibrateFromSessions(strings.Split(*from, ","), *serial)
-	}
 
 	camPath, err := store.CameraPath()
 	if err != nil {
@@ -45,20 +34,6 @@ func cmdHeadPoseCalibrate(args []string) error {
 	if err != nil {
 		return err
 	}
-	base := *sessions
-	if base == "" {
-		cache, err := os.UserCacheDir()
-		if err != nil {
-			return err
-		}
-		base = filepath.Join(cache, "tobii4c", "headpose")
-	}
-	dir := filepath.Join(base, time.Now().Format("20060102-150405"))
-	imgDir := filepath.Join(dir, "images")
-	if err := os.MkdirAll(imgDir, 0o755); err != nil {
-		return err
-	}
-	log.Info("head pose session", "dir", dir)
 
 	conn, err := x11ui.Connect()
 	if err != nil {
@@ -79,8 +54,8 @@ func cmdHeadPoseCalibrate(args []string) error {
 		return fmt.Errorf("monitor %q non trovato", *monName)
 	}
 
-	est, err := headpose.New(headpose.Config{ModelPath: *model, CameraPath: camPath, UserPath: userPath,
-		MaxRate: 30, ManualCalibration: true, RecordDir: dir, DebugDir: imgDir}, log)
+	est, err := headpose.New(headpose.Config{CameraPath: camPath, UserPath: userPath,
+		MaxRate: 30, ManualCalibration: true}, log)
 	if err != nil {
 		return err
 	}
@@ -132,56 +107,11 @@ wait:
 	}
 	app.HP = est
 	app.Start = calibui.HeadPoseStart
-	if *shots {
-		app.ShotDir = dir
-	}
 	runErr := app.Run(ctx)
 	win.Close()
 	stopTracker()
 	if err := <-trackerDone; err != nil && runErr == nil {
 		runErr = err
 	}
-	fmt.Fprintln(os.Stderr, "dati della sessione:", dir)
 	return runErr
-}
-
-// calibrateFromSessions ricalcola la calibrazione della camera dalle
-// registrazioni di headpose-calibrate e la salva se è affidabile.
-func calibrateFromSessions(dirs []string, serial string) error {
-	if serial == "" {
-		var meta struct {
-			Serial string `json:"serial"`
-		}
-		if data, err := os.ReadFile(filepath.Join(dirs[0], "session.json")); err == nil {
-			_ = json.Unmarshal(data, &meta)
-		}
-		serial = meta.Serial
-	}
-	if serial == "" {
-		return errors.New("numero di serie sconosciuto: usa -serial (tobii4c info lo mostra)")
-	}
-	samples, err := headpose.RecordingSamples(dirs...)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("%d campioni da %d sessioni, calcolo…\n", len(samples), len(dirs))
-	cam, q, err := headpose.CalibrateSamples(samples, 640, 480)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("errore di riproiezione %.2f px, incertezza della rotazione %.2f°\n", q.RMSPx, q.SigmaDeg)
-	fmt.Printf("focale %.0f px, punto principale %.0f,%.0f, camera nel tracker %.0f,%.0f,%.0f mm, inclinazione %.1f°, speculare %v\n",
-		cam.F, cam.CX, cam.CY, cam.C[0], cam.C[1], cam.C[2], headpose.CameraTiltDeg(cam), cam.Mirror)
-	if !headpose.CalibrationReliable(q) {
-		return errors.New("calibrazione non abbastanza precisa: non salvata")
-	}
-	path, err := store.CameraPath()
-	if err != nil {
-		return err
-	}
-	if err := cam.Save(path, serial, q); err != nil {
-		return err
-	}
-	fmt.Println("salvata in", path, "per il 4C", serial)
-	return nil
 }

@@ -1,11 +1,8 @@
 package headpose
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"math"
-	"os"
 	"sort"
 
 	"github.com/ablescia/tobii4c-linux/internal/facemodel"
@@ -21,7 +18,6 @@ const (
 	modelInputName = "input_12"
 	modelLandmarks = "Identity"   // [1,1,1,1434]: x, y, z in pixel del ritaglio
 	modelPresence  = "Identity_1" // [1,1,1,1]: logit della presenza del viso
-	ModelSHA256    = facemodel.SHA256
 	minFaceScore   = 0.5
 	roiScale       = 1.5 // lato del ritaglio / lato del riquadro dei landmark (MediaPipe)
 )
@@ -43,33 +39,17 @@ type Landmarks [NumLandmarks][3]float64
 
 // Detector esegue il modello dei landmark su un ritaglio dell'immagine.
 type Detector struct {
-	// Verified: il file del modello ha lo SHA-256 di quello provato
-	// (ModelSHA256). Un altro modello con gli stessi ingressi e uscite
-	// funziona, ma i parametri del driver sono tarati su questo.
-	Verified bool
-
 	model *nn.Model
 	samp  *sampler
 	lm    []float32
 	pres  []float32
 }
 
-// NewDetector carica il modello ONNX dal file path; con path vuoto usa
-// quello incorporato nel binario.
-func NewDetector(path string, workers int) (*Detector, error) {
-	data := facemodel.ONNX
-	if path != "" {
-		var err error
-		if data, err = os.ReadFile(path); err != nil {
-			return nil, fmt.Errorf("face model: %w", err)
-		}
-	} else {
-		path = "(embedded)"
-	}
-	sum := sha256.Sum256(data)
-	m, err := nn.Parse(data, []int{1, ModelInput, ModelInput, 3})
+// NewDetector carica il modello incorporato nel binario (internal/facemodel).
+func NewDetector(workers int) (*Detector, error) {
+	m, err := nn.Parse(facemodel.ONNX, []int{1, ModelInput, ModelInput, 3})
 	if err != nil {
-		return nil, fmt.Errorf("face model %s: %w", path, err)
+		return nil, fmt.Errorf("face model: %w", err)
 	}
 	if workers > 0 {
 		m.SetWorkers(workers)
@@ -83,10 +63,9 @@ func NewDetector(path string, workers int) (*Detector, error) {
 		return nil, err
 	}
 	if len(lm) != 3*NumLandmarks || len(pres) != 1 {
-		return nil, fmt.Errorf("face model %s: unexpected outputs (%d landmark values, %d scores)", path, len(lm), len(pres))
+		return nil, fmt.Errorf("face model: unexpected outputs (%d landmark values, %d scores)", len(lm), len(pres))
 	}
-	return &Detector{Verified: hex.EncodeToString(sum[:]) == ModelSHA256,
-		model: m, samp: newSampler(ModelInput), lm: lm, pres: pres}, nil
+	return &Detector{model: m, samp: newSampler(ModelInput), lm: lm, pres: pres}, nil
 }
 
 // MACs è il costo di un'inferenza.

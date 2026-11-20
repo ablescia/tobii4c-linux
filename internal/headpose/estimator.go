@@ -12,13 +12,10 @@
 package headpose
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,15 +25,17 @@ import (
 	"github.com/ablescia/tobii4c-linux/internal/ttp"
 )
 
+// imageGazeLagUs: il timestamp di un'immagine 0x501 è in ritardo rispetto a
+// quello dei campioni gaze che vedono gli stessi occhi. Misurato sul 4C
+// (sessione del 2026-11-04, 7850 coppie): errore minimo tra 16 e 33 ms.
+const imageGazeLagUs = 25_000
+
 // Config configura lo stimatore.
 type Config struct {
-	ModelPath  string        // modello ONNX dei landmark; vuoto: quello incorporato
 	CameraPath string        // file della calibrazione della camera (letto e scritto)
 	Workers    int           // goroutine dell'inferenza (default 1: più goroutine guadagnano poco e costano CPU)
 	MaxRate    float64       // inferenze al secondo al massimo (0 = una per immagine, 30 Hz)
 	MaxAge     time.Duration // età massima del pitch applicato a un campione (default 150 ms)
-	DebugDir   string        // se non vuoto, salva immagini annotate
-	DebugEvery time.Duration // intervallo tra le immagini di debug (default 2 s)
 	MinCutoff  float64       // filtro 1€: taglio a testa ferma, Hz (default 1)
 	Beta       float64       // filtro 1€: crescita del taglio con la velocità (default 0.8)
 
@@ -49,9 +48,6 @@ type Config struct {
 	// ManualCalibration: la camera si calibra solo su richiesta
 	// (CalibrateNow), come fa l'applicazione headpose-calibrate.
 	ManualCalibration bool
-	// RecordDir: se non vuoto, registra landmark e occhi (frames.jsonl,
-	// gaze.jsonl) per l'analisi della calibrazione.
-	RecordDir string
 	// UserPath: file con lo zero personale del pitch (letto e scritto).
 	UserPath string
 }
@@ -110,7 +106,6 @@ type Estimator struct {
 	prev      Preview // ultima immagine elaborata, per l'interfaccia
 
 	ctl chan func() // comandi da eseguire nella goroutine di lavoro
-	rec *recorder
 
 	// solo goroutine di lavoro
 	wcam       *Camera
@@ -122,7 +117,6 @@ type Estimator struct {
 	lastSearch int64 // µs del dispositivo
 	searchGap  int64 // attesa prima della prossima ricerca, cresce se fallisce
 	lastRun    time.Time
-	lastDebug  time.Time
 	filt       oneEuro
 	row        ttp.Row
 	frame      irimg.Frame
@@ -165,19 +159,12 @@ func New(cfg Config, log *slog.Logger) (*Estimator, error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = 1
 	}
-	det, err := NewDetector(cfg.ModelPath, cfg.Workers)
+	det, err := NewDetector(cfg.Workers)
 	if err != nil {
 		return nil, err
 	}
 	e := newEstimator(cfg, log, det)
-	model := cfg.ModelPath
-	if model == "" {
-		model = "embedded"
-	}
-	log.Info("head pose model loaded", "model", model, "mmac", det.MACs()/1_000_000, "workers", cfg.Workers)
-	if !det.Verified {
-		log.Warn("head pose: the face model is not the tested one (SHA-256 differs)", "want_sha256", ModelSHA256)
-	}
+	log.Info("head pose model loaded", "mmac", det.MACs()/1_000_000, "workers", cfg.Workers)
 	e.wg.Add(1)
 	go e.loop()
 	return e, nil
@@ -186,9 +173,6 @@ func New(cfg Config, log *slog.Logger) (*Estimator, error) {
 func newEstimator(cfg Config, log *slog.Logger, det landmarker) *Estimator {
 	if cfg.MaxAge <= 0 {
 		cfg.MaxAge = 150 * time.Millisecond
-	}
-	if cfg.DebugEvery <= 0 {
-		cfg.DebugEvery = 2 * time.Second
 	}
 	if cfg.MinCutoff <= 0 {
 		cfg.MinCutoff = 1
@@ -216,14 +200,6 @@ func newEstimator(cfg Config, log *slog.Logger, det landmarker) *Estimator {
 			log.Info("head pose: personal pitch zero loaded", "offset_deg", round1(deg(off)), "path", cfg.UserPath)
 		}
 	}
-	if cfg.RecordDir != "" {
-		r, err := newRecorder(cfg.RecordDir)
-		if err != nil {
-			log.Warn("head pose: recording disabled", "err", err)
-		} else {
-			e.rec = r
-		}
-	}
 	return e
 }
 
@@ -233,9 +209,6 @@ func (e *Estimator) Close() {
 	e.wg.Wait()
 	if d, ok := e.det.(*Detector); ok {
 		d.model.Close()
-	}
-	if e.rec != nil {
-		e.rec.close()
 	}
 }
 
@@ -251,10 +224,6 @@ func (e *Estimator) SetDevice(serial string, area *ttp.DisplayArea) {
 		return
 	}
 	e.serial = serial
-	if e.cfg.RecordDir != "" {
-		data, _ := json.Marshal(map[string]any{"serial": serial, "display_area": area})
-		_ = os.WriteFile(filepath.Join(e.cfg.RecordDir, "session.json"), append(data, '\n'), 0o644)
-	}
 	if e.cfg.CameraPath == "" {
 		return
 	}
@@ -305,9 +274,6 @@ func (e *Estimator) Observe(s *gaze.Sample) {
 	e.away = s.Presence == gaze.PresenceAway
 	res := e.result
 	e.mu.Unlock()
-	if e.rec != nil {
-		e.rec.gaze(s)
-	}
 	if !res.Valid {
 		return
 	}
@@ -489,7 +455,6 @@ func (e *Estimator) process(f *irimg.Frame) {
 		e.filt.reset()
 		e.publish(res, false, 0, 0, false)
 		e.publishPreview(f, nil, crop, res)
-		e.debugImage(f, nil, crop, cam, l, r, eyesOK, res)
 		return
 	}
 	e.Tracked.Add(1)
@@ -500,13 +465,9 @@ func (e *Estimator) process(f *irimg.Frame) {
 	}
 	e.maybeCalibrate(f.W, f.H, f.DeviceUs)
 
-	if e.rec != nil {
-		e.rec.frame(f.DeviceUs, score, lm, mirror, f.W)
-	}
 	if cam == nil || !hasArea {
 		e.publish(res, false, 0, 0, false)
 		e.publishPreview(f, lm, crop, res)
-		e.debugImage(f, lm, crop, cam, l, r, eyesOK, res)
 		return
 	}
 	Rc, _, ok := headInCamera(lm, cam)
@@ -524,7 +485,6 @@ func (e *Estimator) process(f *irimg.Frame) {
 	res.Yaw, res.Roll, res.Valid = hr.Yaw, hr.Roll, true
 	e.publish(res, eyeHV, eyeYaw, eyeRoll, true)
 	e.publishPreview(f, lm, crop, res)
-	e.debugImage(f, lm, crop, cam, l, r, eyesOK, res)
 }
 
 func (e *Estimator) publish(res Result, cmp bool, eyeYaw, eyeRoll float64, ok bool) {
@@ -589,27 +549,11 @@ func (e *Estimator) maybeCalibrate(w, h int, us int64) {
 	e.lastCalib = us
 	e.newVoxels = 0
 	snap := append([]CalibSample(nil), e.samples...)
-	e.saveSamples(snap)
 	e.calibBusy.Store(true)
 	go func() {
 		cam, q, err := calibrateFast(snap, w, h)
 		e.calibDone <- calibOut{cam: cam, q: q, err: err, n: len(snap)}
 	}()
-}
-
-// saveSamples scrive i campioni della calibrazione nella cartella di debug
-// (per analizzarli dopo una prova).
-func (e *Estimator) saveSamples(snap []CalibSample) {
-	if e.cfg.DebugDir == "" {
-		return
-	}
-	data, err := json.Marshal(snap)
-	if err == nil {
-		err = os.WriteFile(filepath.Join(e.cfg.DebugDir, "calib-samples.json"), data, 0o644)
-	}
-	if err != nil {
-		e.log.Warn("head pose: calibration samples not saved", "err", err)
-	}
 }
 
 // calibrateFast stima le inizializzazioni su un sottoinsieme e affina la

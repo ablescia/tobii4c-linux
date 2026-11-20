@@ -1,9 +1,7 @@
 package ttp
 
 import (
-	"encoding/binary"
 	"errors"
-	"math"
 )
 
 // MaxColumns è il numero massimo di colonne decodificate per riga. L'ET5 ne
@@ -223,54 +221,4 @@ func (row *Row) Get(key uint32) (Value, bool) {
 		}
 	}
 	return Value{}, false
-}
-
-// AppendRow codifica row come payload di un messaggio di stream, nello
-// stesso formato che DecodeRow legge. Serve al simulatore e ai test.
-func AppendRow(dst []byte, row *Row) []byte {
-	dst = PayloadPrefix(dst)
-	dst = AppendTag(dst, uint32(row.N)<<16|tagTypeRow)
-	for i := 0; i < row.N; i++ {
-		c := &row.Cols[i]
-		dst = AppendTag(dst, tagColumnProloge)
-		dst = AppendU32(dst, c.Key)
-		dst = appendValue(dst, &c.Value)
-	}
-	return dst
-}
-
-func appendValue(dst []byte, v *Value) []byte {
-	counted := func(t uint8, b []byte) []byte {
-		dst = append(dst, t)
-		dst = binary.BigEndian.AppendUint32(dst, uint32(4+len(b)))
-		dst = binary.BigEndian.AppendUint32(dst, uint32(len(b)))
-		return append(dst, b...)
-	}
-	switch v.Kind {
-	case KindU32:
-		return AppendU32(dst, v.U)
-	case KindS64:
-		dst = append(dst, TypeS64, 0, 0, 0, 8)
-		return binary.BigEndian.AppendUint64(dst, uint64(v.I))
-	case KindFixed16:
-		dst = append(dst, TypeFixed16, 0, 0, 0, 4)
-		return binary.BigEndian.AppendUint32(dst, uint32(int32(math.Round(v.F[0]*q16Scale))))
-	case KindFixed42:
-		return AppendFixed42(dst, v.F[0])
-	case KindPoint:
-		typ := uint32(tagTypePoint3D)
-		if v.N == 2 {
-			typ = tagTypePoint2D
-		}
-		dst = AppendTag(dst, uint32(v.N)<<16|typ)
-		for i := 0; i < int(v.N); i++ {
-			dst = AppendFixed42(dst, v.F[i])
-		}
-		return dst
-	case KindBytes:
-		return counted(TypeBytes, v.B)
-	case KindString:
-		return counted(TypeString, v.B)
-	}
-	return AppendU32(dst, 0)
 }

@@ -7,7 +7,6 @@ import (
 	"image/png"
 	"math"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -51,20 +50,13 @@ func TestSamplerNormalisesContrast(t *testing.T) {
 	}
 }
 
-// loadGray legge un'immagine qualsiasi (PGM, PNG, JPEG) in scala di grigi.
+// loadGray legge un'immagine PNG o JPEG in scala di grigi.
 func loadGray(t testing.TB, path string) *irimg.Frame {
 	fh, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fh.Close()
-	if filepath.Ext(path) == ".pgm" {
-		f, err := irimg.ReadPGM(fh)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return f
-	}
 	img, _, err := image.Decode(fh)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +136,7 @@ func TestDetectOnImage(t *testing.T) {
 	if path == "" {
 		t.Skip("set TOBII4C_FACE_IMAGE")
 	}
-	d, err := NewDetector(os.Getenv("TOBII4C_FACE_MODEL"), 4) // vuoto: modello incorporato
+	d, err := NewDetector(4)
 	if err != nil {
 		t.Fatal(err)
 	}

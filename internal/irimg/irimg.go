@@ -11,12 +11,9 @@
 package irimg
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 
 	"github.com/ablescia/tobii4c-linux/internal/ttp"
 )
@@ -95,79 +92,9 @@ func DecodePayload(payload []byte, row *ttp.Row, f *Frame) error {
 	return Decode(row, f)
 }
 
-// WritePGM scrive il frame come PGM binario (P5).
-func (f *Frame) WritePGM(w io.Writer) error {
-	bw := bufio.NewWriter(w)
-	fmt.Fprintf(bw, "P5\n# tobii4c device_us=%d\n%d %d\n255\n", f.DeviceUs, f.W, f.H)
-	bw.Write(f.Pix[:f.W*f.H])
-	return bw.Flush()
-}
-
-// SavePGM scrive il frame nel file path.
-func (f *Frame) SavePGM(path string) error {
-	fh, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	if err := f.WritePGM(fh); err != nil {
-		fh.Close()
-		return err
-	}
-	return fh.Close()
-}
-
-// ReadPGM legge un PGM binario a 8 bit (per test e strumenti).
-func ReadPGM(r io.Reader) (*Frame, error) {
-	br := bufio.NewReader(r)
-	var magic string
-	if _, err := fmt.Fscan(br, &magic); err != nil || magic != "P5" {
-		return nil, errors.New("irimg: not a binary PGM")
-	}
-	var vals [3]int
-	for i := 0; i < 3; {
-		b, err := br.ReadByte()
-		if err != nil {
-			return nil, err
-		}
-		switch {
-		case b == '#':
-			if _, err := br.ReadString('\n'); err != nil {
-				return nil, err
-			}
-		case b >= '0' && b <= '9':
-			br.UnreadByte()
-			if _, err := fmt.Fscan(br, &vals[i]); err != nil {
-				return nil, err
-			}
-			i++
-		}
-	}
-	if vals[2] != 255 {
-		return nil, fmt.Errorf("irimg: maxval %d, want 255", vals[2])
-	}
-	if _, err := br.ReadByte(); err != nil { // un solo spazio dopo maxval
-		return nil, err
-	}
-	f := &Frame{W: vals[0], H: vals[1], Pix: make([]byte, vals[0]*vals[1])}
-	if _, err := io.ReadFull(br, f.Pix); err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
-// ReadPGMFile legge un PGM binario dal file path.
-func ReadPGMFile(path string) (*Frame, error) {
-	fh, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer fh.Close()
-	return ReadPGM(fh)
-}
-
 // AppendPayload codifica f come payload dello stream 0x501, nello stesso
 // formato del 4C (riga XDS con timestamp, bit per pixel, larghezza, altezza e
-// pixel). Serve al simulatore e ai test.
+// pixel). Serve ai test.
 func AppendPayload(dst []byte, f *Frame) []byte {
 	col := func(dst []byte, key uint32) []byte {
 		dst = ttp.AppendTag(dst, 0x00020bb9)

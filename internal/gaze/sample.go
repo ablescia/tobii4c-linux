@@ -6,10 +6,7 @@
 package gaze
 
 import (
-	"encoding/json"
-	"fmt"
 	"math"
-	"os"
 
 	"github.com/ablescia/tobii4c-linux/internal/ttp"
 )
@@ -209,7 +206,6 @@ type KeyMap struct {
 // Openness". Sull'ET5 la decodifica è verificata bit-per-bit contro lo Stream
 // Engine Windows (Krazubu/tobii-linux, gaze83.rs). Lo sguardo 2D del singolo
 // occhio (0x05/0x0b) non ha una colonna di validità: Gaze2DValid resta 0.
-// Sovrascrivibile con LoadKeyMap.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Timestamp: 0x01, FrameCounter: 0x14,
@@ -258,20 +254,6 @@ var eyeFieldNames = [eyeSlots]string{
 	eGaze2D: "gaze_2d", eGaze2DValid: "gaze_2d_valid",
 	eTrackBox: "trackbox", eTrackBoxValid: "trackbox_valid",
 	eOpenness: "openness", eOpennessValid: "openness_valid",
-}
-
-// LoadKeyMap legge una mappa JSON partendo dai default (i campi omessi restano
-// quelli dell'ET5).
-func LoadKeyMap(path string) (KeyMap, error) {
-	km := DefaultKeyMap()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return km, err
-	}
-	if err := json.Unmarshal(b, &km); err != nil {
-		return km, fmt.Errorf("keymap %s: %w", path, err)
-	}
-	return km, nil
 }
 
 // slot identifica il campo di destinazione di una chiave.

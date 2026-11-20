@@ -13,11 +13,8 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/png"
 	"log/slog"
 	"math"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -80,12 +77,6 @@ type App struct {
 	// headpose-calibrate); Start, se non nil, sostituisce il menu iniziale.
 	HP    *headpose.Estimator
 	Start func() Screen
-
-	// ShotDir: se non vuoto, salva la finestra come PNG a ogni cambio di
-	// schermata e ogni 3 s (per controllare l'impaginazione a distanza).
-	ShotDir  string
-	lastShot time.Time
-	shotN    int
 }
 
 // home è la schermata iniziale: il menu della calibrazione o quella di Start.
@@ -244,14 +235,6 @@ func (a *App) frame(now time.Time) error {
 	}
 	a.curDyn = a.curDyn[:0]
 	a.screen.Frame(a, a.canvas, now)
-	if a.ShotDir != "" && (full || now.Sub(a.lastShot) > 3*time.Second) {
-		a.lastShot = now
-		a.shotN++
-		if fh, err := os.Create(filepath.Join(a.ShotDir, fmt.Sprintf("screen-%03d.png", a.shotN))); err == nil {
-			png.Encode(fh, a.canvas)
-			fh.Close()
-		}
-	}
 	var err error
 	if full {
 		err = a.win.Present(a.canvas, a.canvas.Bounds())

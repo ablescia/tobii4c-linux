@@ -1,7 +1,6 @@
 package irimg
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/ablescia/tobii4c-linux/internal/ttp"
@@ -17,7 +16,7 @@ func imageRow(w, h, bpp uint32, pix []byte) *ttp.Row {
 	return r
 }
 
-func TestDecodeAndPGMRoundTrip(t *testing.T) {
+func TestDecode(t *testing.T) {
 	pix := make([]byte, 4*3)
 	for i := range pix {
 		pix[i] = byte(i * 20)
@@ -29,17 +28,6 @@ func TestDecodeAndPGMRoundTrip(t *testing.T) {
 	pix[0] = 99 // Decode deve aver copiato i pixel
 	if f.W != 4 || f.H != 3 || f.DeviceUs != 102069393206 || f.Pix[0] != 0 || f.At(3, 2) != 220 || f.At(4, 0) != 0 {
 		t.Fatalf("frame %+v", f)
-	}
-	var buf bytes.Buffer
-	if err := f.WritePGM(&buf); err != nil {
-		t.Fatal(err)
-	}
-	g, err := ReadPGM(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.W != 4 || g.H != 3 || !bytes.Equal(g.Pix, f.Pix) {
-		t.Fatalf("round trip %+v", g)
 	}
 }
 
